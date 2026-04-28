@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# environment
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# test artifacts
+coverage/
+
+# example output (router emits via onUsage; examples may write here)
+*.jsonl
