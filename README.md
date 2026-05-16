@@ -2,6 +2,8 @@
 
 A deterministic execution engine for LLM calls. One function: `complete()`. It takes a fully resolved request, calls one provider, returns one result.
 
+Built for systems where model execution must remain predictable, auditable, and separate from policy, routing, fallback, cost, and governance decisions.
+
 ## The Boundary
 
 > The router executes. The controller decides.
