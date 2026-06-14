@@ -4,11 +4,31 @@ A deterministic execution engine for LLM calls. One function: `complete()`. It t
 
 Built for systems where model execution must remain predictable, auditable, and separate from policy, routing, fallback, cost, and governance decisions.
 
+## Why this exists
+
+Most AI applications are welded to one provider. That is a single point of failure dressed up as convenience. Models change, pricing changes, terms change, access gets rationed, and the customer rarely controls the switch.
+
+This is the execution kernel for systems that need to keep control of where AI runs, where data goes, and how decisions are proven, independent of any one vendor.
+
 ## The Boundary
 
 > The router executes. The controller decides.
 
-This is the **execution layer**. Policy — task → model mapping, fallback chains, cost guards, audit, gating — lives in a thin caller-side controller wrapping `complete()`. The router itself never decides.
+This is the **execution layer**. Policy lives in a thin caller side controller wrapping `complete()`: the task → model mapping, fallback chains, cost guards, audit, and gating. The router itself never decides.
+
+```text
+Application
+      │
+      ▼
+Governance Controller     policy, routing, failover, audit, cost
+      │
+      ▼
+AI Execution Router       this repo: deterministic execution only
+      │
+ ┌────┼────┬────┐
+ ▼    ▼    ▼    ▼
+ OpenAI  Anthropic  NVIDIA  Local / Private
+```
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the governing rules.
 
@@ -76,4 +96,8 @@ npm test
 
 ## Status
 
-Phase 1. See [`docs/PHASE_2_SPEC_PLAN.md`](./docs/PHASE_2_SPEC_PLAN.md) for what is coming and `ARCHITECTURE.md` for what will not be added.
+Phase 1: this repo is the execution kernel.
+
+It is also the open core of a governed multi provider pipeline that runs in production, where a controller wraps this kernel and adds per stage policy routing, automatic failover across providers, data classification, and audit. A live deployment runs inside a forensic litigation platform, routing real workloads and failing over across providers when one goes dark, with every switch written to a log.
+
+See [`docs/PHASE_2_SPEC_PLAN.md`](./docs/PHASE_2_SPEC_PLAN.md) for what is coming to the open core, and `ARCHITECTURE.md` for what will not be added.
