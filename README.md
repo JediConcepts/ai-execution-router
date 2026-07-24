@@ -1,5 +1,12 @@
 # AI Execution Router
 
+[![CI](https://github.com/JediConcepts/ai-execution-router/actions/workflows/ci.yml/badge.svg)](https://github.com/JediConcepts/ai-execution-router/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen)](#requirements)
+<!-- Uncomment on first npm publish:
+[![npm](https://img.shields.io/npm/v/ai-execution-router)](https://www.npmjs.com/package/ai-execution-router)
+-->
+
 A deterministic execution engine for LLM calls. One function: `complete()`. It takes a fully resolved request, calls one provider, returns one result.
 
 Built for systems where model execution must remain predictable, auditable, and separate from policy, routing, fallback, cost, and governance decisions.
@@ -35,6 +42,8 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the governing rules.
 ## Minimal Example
 
 ```ts
+// vendored: adjust the path to wherever src/router lives in your tree
+// (after the npm release: import { complete } from "ai-execution-router")
 import { complete } from "./src/router/index.ts";
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -85,13 +94,17 @@ ARCHITECTURE.md         governing document
 
 ## Requirements
 
-- Node 20 or later (uses native `fetch` and TypeScript type-stripping).
+- Node 22.18 or later. The repo runs TypeScript directly via Node's native
+  type stripping, which is enabled by default from 22.18. On Node
+  22.6–22.17, run with `--experimental-strip-types`. Node 20 cannot run the
+  `.ts` sources directly.
 
 ## Running
 
 ```sh
-npm install
-npm test
+npm ci
+npm test                  # node:test suite, mocked fetch, no network
+npx tsc -p tsconfig.json  # typecheck (same gate CI runs)
 ```
 
 ## Status

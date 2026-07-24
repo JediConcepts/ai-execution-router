@@ -1,0 +1,54 @@
+# CI for ai-execution-router
+#
+# Node matrix note (verified, not guessed):
+#   The repo runs TypeScript directly via Node's native type stripping
+#   ("test": "node --test tests/*.test.ts" in package.json). Type stripping
+#   is enabled by default only on Node >= 22.18 (and >= 23.6). Under Node
+#   20.x and 22.13 the suite fails with ERR_UNKNOWN_FILE_EXTENSION ".ts";
+#   under 22.22 all 33 tests pass. A Node 20 lane would therefore be
+#   permanently red, so the matrix is 22 + 24. If Node 20 support becomes a
+#   requirement, the package must ship compiled JS; the dev/test workflow
+#   itself still needs >= 22.18.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # "22" resolves to latest 22.x (>= 22.18, so type stripping is on
+        # by default). "24" is the current LTS line.
+        node-version: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # package-lock.json is committed (lockfileVersion 3), so npm ci is
+      # correct here.
+      - name: Install
+        run: npm ci
+
+      # tsconfig.json sets noEmit: true, so running tsc against it is a
+      # pure typecheck — the same gate documented in the README.
+      - name: Typecheck
+        run: npx tsc -p tsconfig.json
+
+      # Exact script from package.json: "node --test tests/*.test.ts".
+      - name: Test
+        run: npm test
