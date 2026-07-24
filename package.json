@@ -30,17 +30,21 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./src/*": "./src/*.ts",
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "src",
     "ARCHITECTURE.md"
   ],
   "sideEffects": false,
   "scripts": {
     "test": "node --test tests/*.test.ts",
     "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "tsc -p tsconfig.json && npm test && npm run build"
+    "prepublishOnly": "tsc -p tsconfig.json && npm test && npm run build",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22",
