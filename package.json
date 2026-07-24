@@ -1,10 +1,46 @@
 {
   "name": "ai-execution-router",
   "version": "0.1.0",
-  "private": true,
+  "description": "A deterministic execution engine for LLM calls. One function: complete(). The router executes, the controller decides.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JediConcepts/ai-execution-router.git"
+  },
+  "homepage": "https://github.com/JediConcepts/ai-execution-router#readme",
+  "bugs": "https://github.com/JediConcepts/ai-execution-router/issues",
+  "keywords": [
+    "llm",
+    "ai",
+    "router",
+    "execution",
+    "anthropic",
+    "openai",
+    "multi-provider",
+    "governance",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "ARCHITECTURE.md"
+  ],
+  "sideEffects": false,
   "scripts": {
-    "test": "node --test tests/*.test.ts"
+    "test": "node --test tests/*.test.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "tsc -p tsconfig.json && npm test && npm run build"
   },
   "devDependencies": {
     "@types/node": "^22",
