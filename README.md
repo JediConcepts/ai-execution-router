@@ -88,7 +88,7 @@ The caller reads `process.env`. The router does not.
 ```
 src/router/             zero-runtime-dependency router source
 tests/                  node:test suite
-examples/               runnable examples (basic, fallback, usage logging)
+examples/               runnable examples (basic, fallback, usage logging, local-cli-bridge fallback)
 docs/                   phase 2 spec plan
 .claude/skills/         Claude Code skill bundle
 ARCHITECTURE.md         governing document
