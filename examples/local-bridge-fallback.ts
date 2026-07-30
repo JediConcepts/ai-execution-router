@@ -42,6 +42,14 @@ interface Attempt {
   label: string;
   model: string;
   endpoint: Endpoint;
+  /**
+   * AuthError is terminal by convention (ARCHITECTURE.md: surface to ops, do
+   * not retry) — a bad key must not silently mask itself by falling through.
+   * The ONE sanctioned exception is an optional local-bridge attempt: a
+   * missing/mismatched BRIDGE_API_KEY shouldn't strand the caller when a real
+   * cloud attempt follows. Opt in per attempt, never globally.
+   */
+  continueOnAuth?: boolean;
 }
 
 async function callWithFallback(prompt: string, attempts: Attempt[]): Promise<string> {
@@ -59,18 +67,21 @@ async function callWithFallback(prompt: string, attempts: Attempt[]): Promise<st
     } catch (err) {
       lastError = err;
       console.error(`[example] ${a.label} failed: ${(err as Error).name}: ${(err as Error).message}`);
+      if (err instanceof AuthError) {
+        if (a.continueOnAuth) continue;
+        throw err; // terminal: wrong credentials on a real provider must surface
+      }
       if (
         err instanceof RateLimitError ||
         err instanceof TransientError ||
-        err instanceof PermanentError ||
-        err instanceof AuthError // a down/misconfigured bridge shouldn't strand the caller
+        err instanceof PermanentError
       ) {
         continue;
       }
       throw err;
     }
   }
-  throw new Error(`all attempts failed: ${String((lastError as Error)?.message)}`);
+  throw new Error(`all attempts failed: ${String((lastError as Error)?.message)}`, { cause: lastError });
 }
 
 const anthropicKey = process.env.ANTHROPIC_API_KEY;
@@ -96,6 +107,7 @@ const text = await callWithFallback(
         baseUrl: process.env.BRIDGE_BASE_URL || "http://127.0.0.1:8787/v1",
         apiKey: bridgeKey,
       },
+      continueOnAuth: true, // the bridge attempt is optional; the cloud attempt is not
     },
     {
       label: "hosted anthropic",

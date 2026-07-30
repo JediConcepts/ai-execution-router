@@ -130,6 +130,32 @@ test("openai-compatible success returns text and tokens, calls /chat/completions
   }
 });
 
+test("openai-compatible 200 with error: null alongside choices is a normal success", async () => {
+  // Pins the `!= null` semantics: a legitimate server emitting "error": null
+  // next to valid choices must NOT be classified as a failure. Guards against
+  // a future tightening to `"error" in json`.
+  const m = mockFetch([
+    {
+      status: 200,
+      body: {
+        error: null,
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 7, completion_tokens: 4 },
+      },
+    },
+  ]);
+  try {
+    const r = await complete({
+      model: "meta/llama-3.3-70b-instruct",
+      input: { messages: [{ role: "user", content: "hi" }] },
+      endpoint: { apiKey: "k" },
+    });
+    assert.equal(r.text, "ok");
+  } finally {
+    m.restore();
+  }
+});
+
 test("openai-compatible 200 with a top-level error body is a failed attempt, not empty text", async () => {
   // Proxies and tunnel bridges that must commit response headers before the
   // upstream finishes deliver failures as {"error":{...}} on a 200.
