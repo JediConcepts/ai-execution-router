@@ -130,6 +130,27 @@ test("openai-compatible success returns text and tokens, calls /chat/completions
   }
 });
 
+test("openai-compatible 200 with a top-level error body is a failed attempt, not empty text", async () => {
+  // Proxies and tunnel bridges that must commit response headers before the
+  // upstream finishes deliver failures as {"error":{...}} on a 200.
+  const m = mockFetch([
+    { status: 200, body: { error: { message: "backend failed", type: "bridge_backend_error" } } },
+  ]);
+  try {
+    await assert.rejects(
+      () => complete({
+        model: "meta/llama-3.3-70b-instruct",
+        input: { messages: [{ role: "user", content: "hi" }] },
+        endpoint: { apiKey: "k" },
+      }),
+      (err: unknown) =>
+        err instanceof TransientError && /backend failed/.test((err as Error).message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
 test("429 with retry-after header triggers exactly one retry then succeeds", async () => {
   const m = mockFetch([
     { status: 429, headers: { "retry-after": "0" }, body: { error: "slow down" } },

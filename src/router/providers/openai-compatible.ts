@@ -44,6 +44,18 @@ export class OpenAICompatibleProvider implements Provider {
     }
 
     const json = (await response.json()) as OpenAIResponse;
+    if (json.error != null) {
+      // Some OpenAI-compatible servers deliver failures in-body on a committed
+      // 2xx — e.g. proxies and tunnel bridges that must send response headers
+      // before the upstream finishes (local-cli-bridge behind Cloudflare does
+      // this). Without this check an error body would surface as an empty
+      // successful completion instead of a failed attempt.
+      const message =
+        typeof json.error === "string"
+          ? json.error
+          : json.error.message ?? "upstream returned an error body";
+      throw new TransientError(message);
+    }
     const choice = json.choices?.[0];
     return {
       text: choice?.message?.content ?? "",
@@ -55,6 +67,7 @@ export class OpenAICompatibleProvider implements Provider {
 }
 
 interface OpenAIResponse {
+  error?: { message?: string; type?: string } | string;
   choices?: Array<{
     message?: { content?: string };
     finish_reason?: string | null;
