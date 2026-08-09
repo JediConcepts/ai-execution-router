@@ -262,9 +262,9 @@ Earlier revisions shipped a catalog mapping model ids to transports, on the grou
 
 The canonical API is the contract. Breaking changes to the `complete()` signature, the `UsageRecord` shape, or the error class hierarchy require a major version bump.
 
-**Pre-1.0 that rule has no major number to bump**, which is a gap this document did not previously address. Until 1.0.0: a breaking change bumps the *minor* version and must be listed under a `### Breaking` heading in `CHANGELOG.md`. Callers who need stability should pin an exact version or a reviewed commit, because `^0.x` ranges do not protect them the way `^1.x` would.
+That rule was unenforceable while the package sat at 0.x, which has no major number to bump — the gap that made an earlier draft of this release claim to follow a rule it could not. **The package is therefore moving to 1.0.0**, where the rule works as written and `^1.x` gives callers the protection `^0.x` never did.
 
-This is a stopgap, not a virtue. A kernel with production dependents arguably belongs at 1.0.0 already, where the rule above works as written. That decision is open.
+`1.0.0-rc.1` publishes to the `next` dist-tag. A bare `npm install ai-execution-router` continues to resolve to the last stable release; the candidate has to be asked for by name. It is promoted to `latest` only once the live smoke run in [`docs/SMOKE_TEST.md`](./docs/SMOKE_TEST.md) has passed against real endpoints — the mocked suite is necessary and has twice proven insufficient.
 
 Adding new wire shapes, new encodable features, or new optional fields is non-breaking. Narrowing what a shape declares it can encode is breaking.
 

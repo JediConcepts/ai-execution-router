@@ -1,9 +1,19 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 1.0.0-rc.1 — unreleased, published to the `next` dist-tag
 
-This release is **breaking**. Under 0.x there is no major number to bump, so a minor
-bump is the breaking signal, per the versioning rule in `ARCHITECTURE.md`.
+This release is **breaking**, and goes to 1.0.0 rather than 0.2.0 for a reason worth
+stating: the versioning rule in `ARCHITECTURE.md` demands "a major version bump" for
+exactly these changes, and 0.x cannot express one. An earlier draft claimed to follow
+that rule while bumping a minor. It didn't. 1.0.0 makes the rule enforceable and gives
+callers a `^1.x` range that actually protects them.
+
+Released as a candidate on `next`, not `latest`: a bare
+`npm install ai-execution-router` still resolves to the last stable release, and this
+has to be asked for with `@next`. Promotion to `latest` waits on the live smoke run
+in [`docs/SMOKE_TEST.md`](./docs/SMOKE_TEST.md). Two independent reviews have now
+found real fail-open bugs behind a fully green mocked suite; a third green suite is
+not the evidence that should unblock a stable release.
 
 ### Governance note — read this first
 
