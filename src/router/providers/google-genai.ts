@@ -22,7 +22,7 @@
  */
 
 import type {
-  Capability,
+  WireFeature,
   ContentBlock,
   Message,
   Provider,
@@ -31,11 +31,11 @@ import type {
   ResponseFormat,
 } from "../types.ts";
 import { PermanentError } from "../errors.ts";
-import { hasCallerAuth, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
+import { hasCallerAuth, malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
-const CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+const ENCODES: ReadonlySet<WireFeature> = new Set<WireFeature>([
   "multimodal-image",
   "multimodal-document",
   "response-format-json",
@@ -46,7 +46,7 @@ const CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 
 export class GoogleGenAIProvider implements Provider {
   readonly wireShape = "google-genai" as const;
-  readonly capabilities = CAPABILITIES;
+  readonly encodes = ENCODES;
 
   async call(p: ProviderCallParams): Promise<ProviderCallResult> {
     const baseUrl = (p.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
@@ -84,8 +84,10 @@ export class GoogleGenAIProvider implements Provider {
   private async buffered(request: Parameters<typeof postJson>[0]): Promise<ProviderCallResult> {
     const { json, requestId } = await postJson<GenerateContentResponse>(request);
     throwIfPromptBlocked(json);
+    // Past the block check, no candidates means no response — not a silent one.
+    if (!Array.isArray(json.candidates)) throw malformedResponse("no candidates array", json, requestId);
 
-    const candidate = json.candidates?.[0];
+    const candidate = json.candidates[0];
     // `thought: true` parts are reasoning traces, not answer text. The streaming
     // path already skips them; without the same filter here the identical
     // request would return different text depending on whether onDelta was passed.

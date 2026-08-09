@@ -10,11 +10,11 @@
  * A provider protocol, named after the request/response schema on the wire
  * rather than after whoever is serving it.
  *
- * `anthropic` is served by Anthropic, Bedrock, and Vertex. `openai-chat` is
- * served by OpenAI, Azure, NVIDIA NIM, Groq, OpenRouter, Together, Fireworks,
- * DeepSeek, xAI, Ollama, LM Studio, vLLM, and any local bridge that speaks
- * `/chat/completions`. `google-genai` is served by the Gemini Developer API and
- * Vertex AI.
+ * `anthropic` is the Messages API, served by Anthropic and by gateways proxying
+ * it verbatim. `openai-chat` is served by OpenAI, Azure, NVIDIA NIM, Groq,
+ * OpenRouter, Together, Fireworks, DeepSeek, xAI, Ollama, LM Studio, vLLM, and
+ * any local bridge that speaks `/chat/completions`. `google-genai` is served by
+ * the Gemini Developer API and Vertex AI.
  *
  * Adding a vendor is therefore usually a `baseUrl`, not a code change. That is
  * the property the whole design exists to preserve.
@@ -33,12 +33,17 @@ export type ProviderName = WireShape | "openai-compatible";
 /**
  * Request features that genuinely differ between wire shapes.
  *
- * A provider declares what it can express; the router refuses anything else by
- * name rather than dropping it. Features that are merely *expressible in the
- * message array* (an assistant prefill, for instance) are not listed here —
- * they need no gate.
+ * **This describes what a PROTOCOL can encode — not what an endpoint or model
+ * will honour.** `openai-chat` can encode `stream` and `response_format`; a
+ * particular server behind that protocol may reject both (the local CLI bridge
+ * does) or accept and ignore them. That gap is real and the router cannot close
+ * it: only the endpoint knows. Endpoint and model capability profiles belong to
+ * the controller.
+ *
+ * Features merely *expressible in the message array* (an assistant prefill, for
+ * instance) are not listed — they need no gate.
  */
-export type Capability =
+export type WireFeature =
   | "multimodal-image"
   | "multimodal-document"
   | "response-format-json"
@@ -101,7 +106,8 @@ export interface ReasoningOptions {
 }
 
 export interface Endpoint {
-  provider?: ProviderName;
+  /** The wire shape being spoken. Required — see `CompleteParams.endpoint`. */
+  provider: ProviderName;
   baseUrl?: string;
   apiKey?: string;
   /**
@@ -129,7 +135,11 @@ export interface CompleteParams {
   maxTokens?: number;
   responseFormat?: ResponseFormat;
   reasoning?: ReasoningOptions;
-  endpoint?: Endpoint;
+  /**
+   * Required. There is no catalogue and no inference: the caller states which
+   * wire shape is being spoken and where.
+   */
+  endpoint: Endpoint;
 
   /**
    * Wall-clock ceiling for the call, including retry-after sleep.
@@ -186,8 +196,14 @@ export interface CompleteParams {
  * marked `"unreported"`, so a downstream cost model can refuse to price the
  * call instead of silently pricing a fabricated number. Callers that want an
  * estimate must make — and own — that assumption themselves.
+ *
+ * `"reported"` deliberately does not say "measured". It means the endpoint sent
+ * these numbers — nothing more. An endpoint may itself be estimating: the local
+ * CLI bridge derives counts at roughly four characters per token, because the
+ * CLI it wraps reports none. The router cannot tell that apart from a metered
+ * count, so it does not claim to.
  */
-export type TokenSource = "provider" | "partial" | "unreported";
+export type TokenSource = "reported" | "partial" | "unreported";
 
 export interface TokenUsage {
   promptTokens: number;
@@ -244,7 +260,8 @@ export interface AttemptRecord {
 
 export interface Provider {
   readonly wireShape: WireShape;
-  readonly capabilities: ReadonlySet<Capability>;
+  /** What this protocol can encode. NOT what the endpoint behind it supports. */
+  readonly encodes: ReadonlySet<WireFeature>;
   call(params: ProviderCallParams): Promise<ProviderCallResult>;
 }
 

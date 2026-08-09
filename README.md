@@ -75,8 +75,10 @@ The caller reads `process.env`. The router does not.
 | `openai-chat` | OpenAI, Azure, NVIDIA NIM, Groq, OpenRouter, Together, Fireworks, DeepSeek, xAI, Mistral, Ollama, LM Studio, vLLM, local CLI bridges |
 | `google-genai` | Gemini Developer API, Vertex AI |
 
-Bedrock and Vertex's *Anthropic* surface are **not** reachable by `baseUrl` alone —
-both use a different path and body convention. Vertex's Gemini surface is.
+Bedrock's native runtime and Vertex's *Anthropic* surface are **not** reachable by
+`baseUrl` alone — both use a different path and body convention. Vertex's Gemini
+surface is. Vendors keep adding compatibility endpoints, though, so check current
+docs before assuming: a compatible surface needs no code here, only a `baseUrl`.
 
 Most of that list needs no code — only a `baseUrl`:
 

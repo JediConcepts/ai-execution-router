@@ -15,14 +15,14 @@
  */
 
 import type {
-  Capability,
+  WireFeature,
   ContentBlock,
   Message,
   Provider,
   ProviderCallParams,
   ProviderCallResult,
 } from "../types.ts";
-import { hasCallerAuth, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
+import { hasCallerAuth, malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -34,7 +34,7 @@ const ANTHROPIC_VERSION = "2023-06-01";
  * trailing assistant message. Declaring support we do not have would mean
  * silently dropping the constraint.
  */
-const CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+const ENCODES: ReadonlySet<WireFeature> = new Set<WireFeature>([
   "multimodal-image",
   "multimodal-document",
   "reasoning-budget",
@@ -43,7 +43,7 @@ const CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 
 export class AnthropicProvider implements Provider {
   readonly wireShape = "anthropic" as const;
-  readonly capabilities = CAPABILITIES;
+  readonly encodes = ENCODES;
 
   async call(p: ProviderCallParams): Promise<ProviderCallResult> {
     const baseUrl = (p.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
@@ -78,7 +78,10 @@ export class AnthropicProvider implements Provider {
 
   private async buffered(request: Parameters<typeof postJson>[0]): Promise<ProviderCallResult> {
     const { json, requestId } = await postJson<AnthropicResponse>(request);
-    const text = (json.content ?? [])
+    // See the note in openai-chat: an empty block list is an answer, an absent
+    // one is a substituted body.
+    if (!Array.isArray(json.content)) throw malformedResponse("no content array", json, requestId);
+    const text = json.content
       .filter((b): b is AnthropicTextBlock => b.type === "text")
       .map((b) => b.text)
       .join("");

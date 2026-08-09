@@ -98,6 +98,64 @@ it had not covered:
   failure path, where throwing would destroy the provider's real error. Callers
   who prefer the text can catch inside their own callback.
 
+### Fixed (third pass, after a second independent review)
+
+A second review — run against the pushed branch, with live probes rather than
+reading — found six more ways a failure could still be reported as a success, plus
+a broken header merge. All six were reproduced locally before being fixed, and the
+same probe now reports the corrected behaviour.
+
+- **A caller's `Authorization` header queued behind ours instead of replacing it.**
+  Object keys are case-sensitive; HTTP header names are not. Merging
+  `{authorization}` with `{Authorization}` kept both, and `fetch` joined them into
+  `"Bearer ours, Bearer theirs"` — a header no bearer check accepts. This broke
+  every gateway and bridge the feature was added for. `mergeHeaders` now lowercases
+  keys first.
+- **A 200 carrying none of the shape's fields became an empty completion.** A bare
+  `{}` produced `text: ""`. All three providers now require the response to have the
+  field their schema is built on; an empty `content` *inside* a real choice is still
+  a valid answer, an absent `choices` array is not.
+- **A streaming request answered with a non-SSE body vanished.** The frame parser
+  found no `data:` lines, yielded nothing, and returned success — so an error body
+  returned against a streaming call disappeared entirely. Content-type is now
+  checked, and a JSON body is classified rather than discarded.
+- **A malformed frame mid-stream truncated silently.** The parser skipped
+  unparseable frames by design, returning whatever arrived before the corruption as
+  though the model had finished. Now fails closed, as does a stream cut mid-frame.
+- **A deadline expiring during the body read threw a raw `DOMException`.** Body
+  consumption sat outside the abort classifier, so the one topology most likely to
+  hit it — a keep-alive shim flushing headers early and streaming the body minutes
+  later, exactly what the local CLI bridge does — got an unclassified error instead
+  of `TimeoutError`.
+- **An `api-key`-only endpoint (Azure) was rejected before the request was sent**,
+  despite the docs promising support. The credential check required `apiKey` or an
+  `authorization` header; it now accepts any caller-supplied header. It exists to
+  catch the empty-handed call, not to police auth schemes.
+
+### Changed after review
+
+- **`tokenSource: "provider"` → `"reported"`.** The old value implied the provider
+  *measured* the counts. It only means the endpoint sent them — and an endpoint may
+  be estimating: the local CLI bridge derives counts at roughly four characters per
+  token because the CLI it wraps reports none. The router cannot tell that apart
+  from a metered count, so it no longer implies it can.
+- **`Capability` → `WireFeature`; `Provider.capabilities` → `Provider.encodes`.**
+  The old name claimed more than the thing did. These sets describe what a
+  *protocol* can encode, not what an endpoint or model will honour — `openai-chat`
+  can encode `stream`, and the bridge behind it rejects it. Documented as a
+  conservative, hand-maintained snapshot that lags provider additions, and lags
+  closed.
+- **`endpoint` and `endpoint.provider` are now required in the type.** Both were
+  optional while being mandatory at runtime. With catalogue inference gone, the
+  requirement belongs at compile time.
+- **The versioning rule now says what happens pre-1.0.** It required "a major
+  version bump" for breaking changes, which 0.x cannot express — so the claim that
+  0.2.0 followed the rule was not true as written. The rule now states the pre-1.0
+  convention explicitly and records that 1.0.0 is the better home for a kernel with
+  production dependents. That call is open.
+- **The Bedrock and Vertex gap list is marked dated, not authoritative.** Vendors
+  keep adding compatibility surfaces; any of these may already have closed.
+
 ### Added
 
 - `google-genai` wire shape (Gemini Developer API and Vertex AI). `router.ts` gained

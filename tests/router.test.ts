@@ -116,8 +116,9 @@ const HI = { messages: [{ role: "user" as const, content: "hi" }] };
 
 // ─── Endpoint resolution ──────────────────────────────────────────────────────
 
-test("missing endpoint.provider throws PermanentError", async () => {
-  await assert.rejects(() => complete({ model: "m", input: HI }), PermanentError);
+test("a missing endpoint is rejected at runtime as well as at compile time", async () => {
+  // `endpoint` is required in the type. Untyped JS callers still reach here.
+  await assert.rejects(() => complete({ model: "m", input: HI } as never), PermanentError);
 });
 
 test("unknown endpoint.provider throws PermanentError naming the valid shapes", async () => {
@@ -194,7 +195,7 @@ test("anthropic: system hoisted, usage and cache tokens mapped, request id from 
     assert.equal(r.promptTokens, 5);
     assert.equal(r.completionTokens, 3);
     assert.equal(r.cachedPromptTokens, 2);
-    assert.equal(r.tokenSource, "provider");
+    assert.equal(r.tokenSource, "reported");
     assert.equal(r.providerRequestId, "req_abc");
   } finally {
     m.restore();
@@ -642,7 +643,7 @@ test("onUsage fires once on success and carries the wire shape", async () => {
     assert.equal(records.length, 1);
     assert.equal(records[0].task, "summarize");
     assert.equal(records[0].wireShape, "anthropic");
-    assert.equal(records[0].tokenSource, "provider");
+    assert.equal(records[0].tokenSource, "reported");
   } finally {
     m.restore();
   }
@@ -717,7 +718,7 @@ test("openai-chat streams deltas and still returns one result with usage", async
     assert.equal(r.text, "Hello");
     assert.equal(r.finishReason, "stop");
     assert.equal(r.promptTokens, 3);
-    assert.equal(r.tokenSource, "provider");
+    assert.equal(r.tokenSource, "reported");
     const body = JSON.parse(m.calls[0].body);
     assert.equal(body.stream, true);
     assert.deepEqual(body.stream_options, { include_usage: true });
@@ -966,5 +967,149 @@ test("a streamed call still reports a header-only request id", async () => {
     assert.equal(r.providerRequestId, "req_stream_1");
   } finally {
     m.restore();
+  }
+});
+
+// ─── Second review round (Codex) ──────────────────────────────────────────────
+
+test("a caller authorization header REPLACES ours rather than queueing behind it", async () => {
+  // Object keys are case-sensitive; HTTP header names are not. Merging
+  // {authorization} with {Authorization} kept both, and fetch joined them into
+  // "Bearer ours, Bearer theirs" — a header no bearer check anywhere accepts.
+  const m = mockFetch([OAI_OK]);
+  try {
+    await complete({
+      model: "m",
+      input: HI,
+      endpoint: { ...OAI, headers: { Authorization: "Bearer caller" } },
+    });
+    assert.equal(m.calls[0].headers.get("authorization"), "Bearer caller");
+  } finally {
+    m.restore();
+  }
+});
+
+test("an api-key-only endpoint (Azure) is accepted without apiKey", async () => {
+  const m = mockFetch([OAI_OK]);
+  try {
+    const r = await complete({
+      model: "m",
+      input: HI,
+      endpoint: { provider: "openai-chat", baseUrl: "https://az.test/v1", headers: { "api-key": "secret" } },
+    });
+    assert.equal(r.text, "ok");
+    assert.equal(m.calls[0].headers.get("api-key"), "secret");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a call with no credential at all is still rejected", async () => {
+  await assert.rejects(
+    () => complete({ model: "m", input: HI, endpoint: { provider: "openai-chat", baseUrl: "https://x.test/v1" } }),
+    AuthError,
+  );
+});
+
+test("a 200 carrying none of the shape's fields is malformed, not an empty answer", async () => {
+  for (const [endpoint, body] of [
+    [OAI, {}],
+    [ANTHROPIC, {}],
+    [GEMINI, {}],
+  ] as const) {
+    const m = mockFetch([{ status: 200, body }]);
+    try {
+      await assert.rejects(
+        () => complete({ model: "m", input: HI, endpoint }),
+        (err: Error) => /malformed provider response/.test(err.message),
+      );
+    } finally {
+      m.restore();
+    }
+  }
+});
+
+test("an empty completion inside a well-formed response is still a valid answer", async () => {
+  // The line is "no choices array" vs "a choice whose content is empty".
+  const m = mockFetch([
+    { status: 200, body: { choices: [{ message: { content: "" }, finish_reason: "stop" }] } },
+  ]);
+  try {
+    const r = await complete({ model: "m", input: HI, endpoint: OAI });
+    assert.equal(r.text, "");
+    assert.equal(r.finishReason, "stop");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a streaming request answered with a non-SSE body raises", async () => {
+  const m = mockFetch([{ status: 200, body: { error: { message: "not a stream" } } }]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} }),
+      (err: Error) => /not a stream/.test(err.message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("a malformed frame mid-stream fails rather than truncating silently", async () => {
+  const m = mockFetch([
+    {
+      status: 200,
+      contentType: SSE,
+      body: 'data: {"choices":[{"delta":{"content":"par"}}]}\n\ndata: {oops\n\n',
+    },
+  ]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} }),
+      (err: Error) => /unparseable data frame/.test(err.message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("a stream cut mid-frame is a truncation, not a completion", async () => {
+  const m = mockFetch([
+    { status: 200, contentType: SSE, body: 'data: {"choices":[{"delta":{"content":"par"}}]}\n\ndata: {"cho' },
+  ]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} }),
+      (err: Error) => /ended mid-frame/.test(err.message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("a deadline that expires during the body read is still a TimeoutError", async () => {
+  // The keep-alive topology: headers flushed immediately, body arrives late.
+  const realFetchRef = globalThis.fetch;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"choices":'));
+          init?.signal?.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            controller.error(err);
+          });
+        },
+      }),
+      { headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI, timeoutMs: 30 }),
+      (err: Error) => err instanceof TimeoutError,
+    );
+  } finally {
+    globalThis.fetch = realFetchRef;
   }
 });

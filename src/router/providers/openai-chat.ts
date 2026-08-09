@@ -8,7 +8,7 @@
  */
 
 import type {
-  Capability,
+  WireFeature,
   ContentBlock,
   Message,
   Provider,
@@ -17,7 +17,7 @@ import type {
   ResponseFormat,
 } from "../types.ts";
 import { PermanentError } from "../errors.ts";
-import { mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
+import { malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 /**
  * No `multimodal-document`: document/file parts are not part of the chat
@@ -25,7 +25,7 @@ import { mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
  * is no portable spelling, and inventing one would produce a request most of
  * the compatible tail would reject.
  */
-const CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+const ENCODES: ReadonlySet<WireFeature> = new Set<WireFeature>([
   "multimodal-image",
   "response-format-json",
   "response-format-schema",
@@ -35,7 +35,7 @@ const CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 
 export class OpenAIChatProvider implements Provider {
   readonly wireShape = "openai-chat" as const;
-  readonly capabilities = CAPABILITIES;
+  readonly encodes = ENCODES;
 
   async call(p: ProviderCallParams): Promise<ProviderCallResult> {
     if (!p.baseUrl) {
@@ -75,7 +75,11 @@ export class OpenAIChatProvider implements Provider {
 
   private async buffered(request: Parameters<typeof postJson>[0]): Promise<ProviderCallResult> {
     const { json, requestId } = await postJson<OpenAIResponse>(request);
-    const choice = json.choices?.[0];
+    // An empty `content` inside a real choice is a legitimate answer. A missing
+    // `choices` array is not an answer at all — it is a gateway or proxy body
+    // wearing a 200, and returning "" for it invents a completion.
+    if (!Array.isArray(json.choices)) throw malformedResponse("no choices array", json, requestId);
+    const choice = json.choices[0];
     return {
       text: choice?.message?.content ?? "",
       ...usageOf(json.usage),

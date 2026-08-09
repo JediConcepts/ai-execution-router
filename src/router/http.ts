@@ -156,7 +156,7 @@ export async function postJson<T>(p: HttpPostParams): Promise<{ json: T; request
   const requestId = readRequestId(response, p.requestIdHeaders ?? DEFAULT_REQUEST_ID_HEADERS);
   if (!response.ok) await readErrorResponse(response, requestId);
 
-  const raw = await response.text();
+  const raw = await readBodyText(response, p.signal, requestId);
   let json: T;
   try {
     json = JSON.parse(raw) as T;
@@ -195,6 +195,27 @@ export async function openSse(p: HttpPostParams): Promise<SseStream> {
       requestId,
     });
   }
+
+  // A 200 that is not an event stream is not a stream at all. Left to the frame
+  // parser it yields zero frames and reads as an empty completion — so an error
+  // body returned against a streaming request would vanish entirely.
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("event-stream")) {
+    const raw = await readBodyText(response, p.signal, requestId);
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      throw malformedResponse(`expected an event stream, got "${contentType || "no content-type"}"`, raw, requestId);
+    }
+    throwIfBodyError(json, { status: response.status, requestId });
+    throw malformedResponse(
+      `expected an event stream, got "${contentType || "no content-type"}"`,
+      json,
+      requestId,
+    );
+  }
+
   return { requestId, frames: readFrames(response.body, p.signal, requestId) };
 }
 
@@ -240,9 +261,10 @@ async function* readFrames(
         try {
           payload = JSON.parse(data);
         } catch {
-          // A malformed frame mid-stream is not worth failing the whole call
-          // over; the terminating event still decides success.
-          continue;
+          // Fail closed. A complete `data:` frame that is not JSON means the
+          // stream is corrupt, and swallowing it returns whatever text arrived
+          // before the corruption as though the model had finished speaking.
+          throw malformedResponse("unparseable data frame mid-stream", data, requestId);
         }
         check(payload);
         yield payload;
@@ -251,14 +273,16 @@ async function* readFrames(
     // Some servers close without a trailing blank line — flush whatever is left.
     const tail = parseSseData(buffer);
     if (tail !== undefined && tail !== "[DONE]") {
+      let payload: unknown;
       try {
-        const payload = JSON.parse(tail);
-        check(payload);
-        yield payload;
-      } catch (err) {
-        if (err instanceof LLMError) throw err;
-        // Trailing partial frame: ignore.
+        payload = JSON.parse(tail);
+      } catch {
+        // The connection ended mid-frame. That is a truncated response, not a
+        // complete one, and the accumulated text must not be passed off as final.
+        throw malformedResponse("stream ended mid-frame", tail, requestId);
       }
+      check(payload);
+      yield payload;
     }
   } catch (err) {
     const aborted = classifyAbort(err, signal);
@@ -289,6 +313,32 @@ function parseSseData(rawEvent: string): string | undefined {
   return parts.join("\n");
 }
 
+/**
+ * Read a response body, classifying an abort that fires mid-read.
+ *
+ * The deadline can easily expire *after* headers arrive: any keep-alive shim
+ * committing to a 200 while a slow backend works — the local CLI bridge does
+ * exactly this for runs of several minutes — flushes headers early and streams
+ * the body late. Left unwrapped, that abort surfaces as a raw DOMException
+ * instead of TimeoutError, and every typed-error guarantee in the README is
+ * false for the one topology most likely to hit it.
+ */
+async function readBodyText(
+  response: Response,
+  signal: AbortSignal | undefined,
+  requestId: string | undefined,
+): Promise<string> {
+  try {
+    return await response.text();
+  } catch (err) {
+    const aborted = classifyAbort(err, signal);
+    if (aborted) throw aborted;
+    throw classifyHttpError(undefined, undefined, `response body read failed: ${errMessage(err)}`, err, {
+      requestId,
+    });
+  }
+}
+
 async function doFetch(p: HttpPostParams): Promise<Response> {
   try {
     return await fetch(p.url, {
@@ -308,13 +358,37 @@ function errMessage(err: unknown): string {
   return String((err as Error)?.message ?? err ?? "network error");
 }
 
-/** Merge caller headers over the wire shape's own. Caller wins, deliberately. */
+/**
+ * Merge caller headers over the wire shape's own. Caller wins, deliberately.
+ *
+ * Keys are lowercased first. HTTP header names are case-insensitive, but object
+ * keys are not: merging `{authorization}` with `{Authorization}` keeps BOTH, and
+ * `fetch` then joins them into `"Bearer ours, Bearer theirs"` — a header that
+ * satisfies no bearer check anywhere. The caller's value has to actually replace
+ * ours, not queue behind it.
+ */
 export function mergeHeaders(
   base: Record<string, string>,
   extra: Record<string, string> | undefined,
 ): Record<string, string> {
-  if (!extra) return base;
-  return { ...base, ...extra };
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) out[k.toLowerCase()] = v;
+  for (const [k, v] of Object.entries(extra ?? {})) out[k.toLowerCase()] = v;
+  return out;
+}
+
+/**
+ * A response that parsed but carries none of the fields its wire shape requires.
+ *
+ * Transient rather than permanent: the usual cause is a proxy, load balancer or
+ * gateway substituting its own body, which the same request may survive next time.
+ */
+export function malformedResponse(detail: string, json: unknown, requestId?: string): LLMError {
+  return classifyHttpError(502, undefined, `malformed provider response: ${detail}`, json, {
+    status: 502,
+    body: safeStringify(json),
+    requestId,
+  });
 }
 
 /** True when the caller supplied their own `authorization` header, in any casing. */
@@ -322,11 +396,15 @@ export function hasCallerAuth(extra: Record<string, string> | undefined): boolea
   return Object.keys(extra ?? {}).some((k) => k.toLowerCase() === "authorization");
 }
 
-/** Classify reported token counts without ever inventing a number. */
+/**
+ * Classify token counts without ever inventing one.
+ *
+ * "reported" means the endpoint sent them, not that anyone measured them.
+ */
 export function tokenSourceOf(prompt: number | undefined, completion: number | undefined) {
   const hasPrompt = typeof prompt === "number";
   const hasCompletion = typeof completion === "number";
-  if (hasPrompt && hasCompletion) return "provider" as const;
+  if (hasPrompt && hasCompletion) return "reported" as const;
   if (hasPrompt || hasCompletion) return "partial" as const;
   return "unreported" as const;
 }

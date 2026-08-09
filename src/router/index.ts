@@ -2,7 +2,7 @@ export { complete } from "./router.ts";
 
 export type {
   AttemptRecord,
-  Capability,
+  WireFeature,
   CompleteParams,
   CompleteResult,
   ContentBlock,

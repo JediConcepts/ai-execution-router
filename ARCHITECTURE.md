@@ -86,14 +86,19 @@ A concrete test of the boundary: **Vertex AI authenticates with an OAuth bearer 
 Being specific about what "reachable by `baseUrl`" does **not** cover, so nobody
 follows the table above into a 404:
 
-- **AWS Bedrock** posts to `/model/{modelId}/invoke`, wants `anthropic_version` in
-  the body, and rejects a `model` field. Also SigV4, not bearer auth.
+- **AWS Bedrock's native runtime** posts to `/model/{modelId}/invoke`, wants
+  `anthropic_version` in the body, rejects a `model` field, and signs with SigV4.
 - **Vertex AI's Anthropic surface** posts to
   `…/publishers/anthropic/models/{model}:rawPredict`.
 
-Both serve Anthropic models but neither serves the Messages shape at the path this
-router uses. They need dedicated variants, not configuration. Vertex's *Gemini*
-surface is reachable today, and is tested.
+Neither serves the Messages shape at the path this provider uses, so neither is
+reachable by `baseUrl` alone. Vertex's *Gemini* surface is, and is tested.
+
+Treat this list as **dated, not authoritative**. Vendors keep adding
+OpenAI- and Anthropic-compatible surfaces alongside their native ones, and any of
+these gaps may already have closed via a compatibility endpoint. Check the
+provider's current documentation before concluding something is unreachable — and
+if a compatible surface exists, it needs no code here, only a `baseUrl`.
 
 ---
 
@@ -108,6 +113,10 @@ Each provider therefore declares the `Capability` set it can actually express, a
 ```
 UnsupportedCapabilityError: Wire shape "anthropic" cannot express "responseFormat.type=json"
 ```
+
+What a shape declares it can encode is a **conservative snapshot**, maintained by hand against provider documentation. Providers add parameters faster than this file is updated, so the sets will lag — and when they lag, they lag *closed*: a caller gets a clear `UnsupportedCapabilityError` for something the provider has since started accepting. That is the safe direction to be wrong in, but it is still wrong, and widening a set as providers move is expected maintenance rather than a redesign.
+
+The sets also describe **protocols, not endpoints**. `openai-chat` can encode `stream` and `response_format`; a particular server behind that protocol may reject both, or accept and silently ignore them. The router cannot close that gap — only the endpoint knows what it honours. Endpoint and model capability profiles are a controller concern.
 
 Two rules follow from this:
 
@@ -253,7 +262,11 @@ Earlier revisions shipped a catalog mapping model ids to transports, on the grou
 
 The canonical API is the contract. Breaking changes to the `complete()` signature, the `UsageRecord` shape, or the error class hierarchy require a major version bump.
 
-Adding new wire shapes, new capabilities, or new optional fields is non-breaking. Narrowing a declared capability is breaking.
+**Pre-1.0 that rule has no major number to bump**, which is a gap this document did not previously address. Until 1.0.0: a breaking change bumps the *minor* version and must be listed under a `### Breaking` heading in `CHANGELOG.md`. Callers who need stability should pin an exact version or a reviewed commit, because `^0.x` ranges do not protect them the way `^1.x` would.
+
+This is a stopgap, not a virtue. A kernel with production dependents arguably belongs at 1.0.0 already, where the rule above works as written. That decision is open.
+
+Adding new wire shapes, new encodable features, or new optional fields is non-breaking. Narrowing what a shape declares it can encode is breaking.
 
 ---
 

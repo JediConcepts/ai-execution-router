@@ -1,6 +1,6 @@
 import type {
   AttemptRecord,
-  Capability,
+  WireFeature,
   CompleteParams,
   CompleteResult,
   Endpoint,
@@ -212,8 +212,8 @@ function report(
  * provable behaviour, failing open is the one unacceptable failure mode.
  */
 function assertCapabilities(params: CompleteParams, provider: Provider): void {
-  const need = (capability: Capability, what: string, hint?: string) => {
-    if (!provider.capabilities.has(capability)) {
+  const need = (feature: WireFeature, what: string, hint?: string) => {
+    if (!provider.encodes.has(feature)) {
       throw new UnsupportedCapabilityError(what, provider.wireShape, hint);
     }
   };
@@ -251,7 +251,7 @@ function assertCapabilities(params: CompleteParams, provider: Provider): void {
   if (params.onDelta) need("streaming", "onDelta (streaming)");
 }
 
-function resolveEndpoint(supplied: Endpoint | undefined): ResolvedEndpoint {
+function resolveEndpoint(supplied: Endpoint): ResolvedEndpoint {
   const wireShape = normaliseWireShape(supplied?.provider);
   if (!wireShape) {
     throw new PermanentError(
@@ -261,15 +261,16 @@ function resolveEndpoint(supplied: Endpoint | undefined): ResolvedEndpoint {
   if (wireShape === "openai-chat" && !supplied?.baseUrl) {
     throw new PermanentError("baseUrl is required for the openai-chat wire shape");
   }
-  // A credential must be present — but not necessarily as an API key. Bearer
-  // auth (Vertex, Bedrock, a gateway) arrives as a header the controller minted,
-  // and for those endpoints `apiKey` is genuinely unused.
-  const callerAuthenticates = Object.keys(supplied?.headers ?? {}).some(
-    (k) => k.toLowerCase() === "authorization",
-  );
-  if (!supplied?.apiKey && !callerAuthenticates) {
+  // A credential must be present — but not necessarily as an API key, and not
+  // necessarily as a bearer. Azure authenticates with `api-key`, Cloudflare
+  // Access with a service-token pair, a gateway with whatever it chose. The
+  // router cannot enumerate those schemes without becoming the credential
+  // authority it refuses to be, so any caller-supplied header counts: this check
+  // exists to catch the empty-handed call, not to police auth.
+  const callerSuppliedHeaders = Object.keys(supplied?.headers ?? {}).length > 0;
+  if (!supplied?.apiKey && !callerSuppliedHeaders) {
     throw new AuthError(
-      "No credential supplied. Set endpoint.apiKey, or pass an authorization header via endpoint.headers.",
+      "No credential supplied. Set endpoint.apiKey, or pass one via endpoint.headers.",
     );
   }
   return {
