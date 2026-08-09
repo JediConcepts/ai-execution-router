@@ -1,10 +1,17 @@
 /**
  * Anthropic Messages wire shape.
  *
- * Served by Anthropic direct, AWS Bedrock, and GCP Vertex. Bedrock and Vertex
- * differ only in `baseUrl` and auth, both of which reach this provider through
- * `endpoint.baseUrl` / `endpoint.headers` — no code here knows which one it is
- * talking to.
+ * Covers the Anthropic API and any gateway that proxies it verbatim — a
+ * corporate egress proxy, an observability shim, a self-hosted relay. Point
+ * `baseUrl` at it and supply whatever auth it wants via `headers`.
+ *
+ * NOT currently reachable: Bedrock and Vertex. Both serve Anthropic models, but
+ * neither serves this exact shape. Bedrock posts to `/model/{id}/invoke` and
+ * wants `anthropic_version` in the body with no `model` field; Vertex posts to
+ * `…/publishers/anthropic/models/{model}:rawPredict`. The path and body here are
+ * fixed, so a `baseUrl` alone cannot reach either. Supporting them means a
+ * dedicated variant, not a configuration change — and claiming otherwise in the
+ * docs would send callers to a 404.
  */
 
 import type {
@@ -15,7 +22,7 @@ import type {
   ProviderCallParams,
   ProviderCallResult,
 } from "../types.ts";
-import { mergeHeaders, postJson, postSse, tokenSourceOf } from "../http.ts";
+import { hasCallerAuth, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -55,14 +62,15 @@ export class AnthropicProvider implements Provider {
     }
     if (streaming) body.stream = true;
 
-    const headers = mergeHeaders(
-      {
-        "content-type": "application/json",
-        "x-api-key": p.apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      p.headers,
-    );
+    const base: Record<string, string> = {
+      "content-type": "application/json",
+      "anthropic-version": ANTHROPIC_VERSION,
+    };
+    // When the caller brought their own bearer — a gateway, a relay — `apiKey`
+    // is legitimately absent, and sending `x-api-key: ""` alongside it is at
+    // best noise and at worst a 401 on a correctly credentialled request.
+    if (!hasCallerAuth(p.headers)) base["x-api-key"] = p.apiKey;
+    const headers = mergeHeaders(base, p.headers);
 
     const request = { url: `${baseUrl}/v1/messages`, headers, body, signal: p.signal };
     return streaming ? this.stream(request, p.onDelta!) : this.buffered(request);
@@ -84,21 +92,24 @@ export class AnthropicProvider implements Provider {
   }
 
   private async stream(
-    request: Parameters<typeof postSse>[0],
+    request: Parameters<typeof openSse>[0],
     onDelta: (delta: string) => void,
   ): Promise<ProviderCallResult> {
     let text = "";
     let stopReason: string | undefined;
-    let messageId: string | undefined;
     // Anthropic splits usage across two events: input tokens land on
     // `message_start`, output tokens on the final `message_delta`.
     let usage: AnthropicUsage = {};
 
-    for await (const raw of postSse(request)) {
+    const { requestId, frames } = await openSse(request);
+    let messageId: string | undefined = requestId;
+
+    for await (const raw of frames) {
       const event = raw as AnthropicStreamEvent;
       switch (event.type) {
         case "message_start":
-          messageId = event.message?.id;
+          // The header id wins where present, matching the buffered path.
+          messageId ??= event.message?.id;
           if (event.message?.usage) usage = { ...usage, ...event.message.usage };
           break;
         case "content_block_delta": {

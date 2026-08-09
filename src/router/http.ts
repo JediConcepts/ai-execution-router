@@ -3,11 +3,18 @@
  *
  * Three providers previously each had their own copy of "fetch, check `ok`,
  * classify". Centralising it means a transport-level fix — the in-body error
- * below, abort classification, header merging — lands for all of them by
- * construction rather than by remembering to patch three files.
+ * handling below, abort classification, header merging — lands for all of them
+ * by construction rather than by remembering to patch three files.
  */
 
-import { CancelledError, LLMError, TimeoutError, classifyHttpError, type ErrorDetails } from "./errors.ts";
+import {
+  CancelledError,
+  LLMError,
+  TimeoutError,
+  classifyBodyError,
+  classifyHttpError,
+  type ErrorDetails,
+} from "./errors.ts";
 
 export interface HttpPostParams {
   url: string;
@@ -55,6 +62,38 @@ function readRequestId(response: Response, candidates: string[]): string | undef
   return undefined;
 }
 
+interface ProviderErrorPayload {
+  message: string;
+  code?: string;
+  status?: number;
+}
+
+/**
+ * Extract a provider error from an `error` field, or `undefined` if there isn't
+ * a real one there.
+ *
+ * Mere presence of the key is not enough. Several OpenAI-compatible servers and
+ * proxies always include `error`, populating it only on failure, so treating
+ * `{"error": {}}` as a failure would throw away perfectly good completions.
+ */
+function readProviderError(err: unknown): ProviderErrorPayload | undefined {
+  if (err === null || err === undefined) return undefined;
+  if (typeof err === "string") return err.trim() ? { message: err } : undefined;
+  if (typeof err !== "object") return { message: String(err) };
+
+  const o = err as { message?: unknown; code?: unknown; type?: unknown; status?: unknown };
+  const message = typeof o.message === "string" ? o.message.trim() : "";
+  const rawCode = o.code ?? o.type;
+  const code = typeof rawCode === "string" && rawCode.trim() ? rawCode : undefined;
+  if (!message && !code) return undefined;
+
+  return {
+    message: message || code || "unknown provider error",
+    code,
+    status: typeof o.status === "number" ? o.status : undefined,
+  };
+}
+
 /**
  * An error delivered inside a 200 response.
  *
@@ -67,26 +106,30 @@ function readRequestId(response: Response, candidates: string[]): string | undef
  */
 function throwIfBodyError(json: unknown, details: ErrorDetails): void {
   if (typeof json !== "object" || json === null) return;
-  const err = (json as { error?: unknown }).error;
-  if (err === undefined || err === null) return;
+  const payload = readProviderError((json as { error?: unknown }).error);
+  if (!payload) return;
+  throw bodyError(payload, json, details);
+}
 
-  const message =
-    typeof err === "string"
-      ? err
-      : ((err as { message?: string }).message ?? JSON.stringify(err).slice(0, 300));
-  const providerCode =
-    typeof err === "object"
-      ? ((err as { code?: string; type?: string }).code ?? (err as { type?: string }).type)
-      : undefined;
+function bodyError(payload: ProviderErrorPayload, cause: unknown, details: ErrorDetails): LLMError {
+  const err = classifyBodyError(
+    `provider returned an error in a successful response: ${payload.message}`,
+    {
+      ...details,
+      status: payload.status ?? details.status,
+      providerCode: payload.code ?? details.providerCode,
+      body: details.body ?? safeStringify(cause),
+    },
+  );
+  return err;
+}
 
-  // Reuse the status classifier so an in-body error is bucketed exactly like the
-  // equivalent HTTP failure — an in-body quota message is still a quota error.
-  const status = (typeof err === "object" ? (err as { status?: number }).status : undefined) ?? 502;
-  throw classifyHttpError(status, undefined, `provider returned an error in a successful response: ${message}`, json, {
-    ...details,
-    status,
-    providerCode,
-  });
+function safeStringify(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
 }
 
 async function readErrorResponse(response: Response, requestId: string | undefined): Promise<never> {
@@ -128,8 +171,21 @@ export async function postJson<T>(p: HttpPostParams): Promise<{ json: T; request
   return { json, requestId };
 }
 
-/** POST JSON, consume a `text/event-stream` response, yielding parsed data payloads. */
-export async function* postSse(p: HttpPostParams): AsyncGenerator<unknown, void, void> {
+export interface SseStream {
+  /** Read from the response headers, before any frame is consumed. */
+  requestId?: string;
+  frames: AsyncGenerator<unknown, void, void>;
+}
+
+/**
+ * POST JSON, then stream a `text/event-stream` response.
+ *
+ * Returns the request id alongside the frames rather than only yielding frames:
+ * an endpoint that reports its id in a header and not in the payload would
+ * otherwise lose it on every streamed call, leaving the record unreconcilable
+ * against the provider's billing.
+ */
+export async function openSse(p: HttpPostParams): Promise<SseStream> {
   const response = await doFetch(p);
   const requestId = readRequestId(response, p.requestIdHeaders ?? DEFAULT_REQUEST_ID_HEADERS);
   if (!response.ok) await readErrorResponse(response, requestId);
@@ -139,10 +195,32 @@ export async function* postSse(p: HttpPostParams): AsyncGenerator<unknown, void,
       requestId,
     });
   }
+  return { requestId, frames: readFrames(response.body, p.signal, requestId) };
+}
 
+async function* readFrames(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal | undefined,
+  requestId: string | undefined,
+): AsyncGenerator<unknown, void, void> {
   const decoder = new TextDecoder();
-  const reader = response.body.getReader();
+  const reader = body.getReader();
   let buffer = "";
+
+  /**
+   * A provider error can also arrive mid-stream, as a frame.
+   *
+   * Same trap as the buffered case and the same consequence: the stream simply
+   * stops, the accumulated text is returned, and a truncated or empty answer
+   * is reported as a success. Anthropic sends `{"type":"error","error":{…}}`;
+   * OpenAI-compatible servers send a bare `{"error":{…}}`.
+   */
+  const check = (payload: unknown): void => {
+    if (typeof payload !== "object" || payload === null) return;
+    const providerError = readProviderError((payload as { error?: unknown }).error);
+    if (!providerError) return;
+    throw bodyError(providerError, payload, { requestId });
+  };
 
   try {
     while (true) {
@@ -155,28 +233,35 @@ export async function* postSse(p: HttpPostParams): AsyncGenerator<unknown, void,
       while ((boundary = findEventBoundary(buffer)) !== -1) {
         const rawEvent = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary).replace(/^(\r?\n){2}/, "");
-        const payload = parseSseData(rawEvent);
-        if (payload === undefined) continue;
-        if (payload === "[DONE]") return;
+        const data = parseSseData(rawEvent);
+        if (data === undefined) continue;
+        if (data === "[DONE]") return;
+        let payload: unknown;
         try {
-          yield JSON.parse(payload);
+          payload = JSON.parse(data);
         } catch {
-          // A malformed frame mid-stream is not worth failing the whole call over;
-          // the terminating event still decides success.
+          // A malformed frame mid-stream is not worth failing the whole call
+          // over; the terminating event still decides success.
+          continue;
         }
+        check(payload);
+        yield payload;
       }
     }
     // Some servers close without a trailing blank line — flush whatever is left.
     const tail = parseSseData(buffer);
     if (tail !== undefined && tail !== "[DONE]") {
       try {
-        yield JSON.parse(tail);
-      } catch {
-        /* ignore trailing partial frame */
+        const payload = JSON.parse(tail);
+        check(payload);
+        yield payload;
+      } catch (err) {
+        if (err instanceof LLMError) throw err;
+        // Trailing partial frame: ignore.
       }
     }
   } catch (err) {
-    const aborted = classifyAbort(err, p.signal);
+    const aborted = classifyAbort(err, signal);
     if (aborted) throw aborted;
     if (err instanceof LLMError) throw err;
     throw classifyHttpError(undefined, undefined, `stream read failed: ${errMessage(err)}`, err, { requestId });
@@ -230,6 +315,11 @@ export function mergeHeaders(
 ): Record<string, string> {
   if (!extra) return base;
   return { ...base, ...extra };
+}
+
+/** True when the caller supplied their own `authorization` header, in any casing. */
+export function hasCallerAuth(extra: Record<string, string> | undefined): boolean {
+  return Object.keys(extra ?? {}).some((k) => k.toLowerCase() === "authorization");
 }
 
 /** Classify reported token counts without ever inventing a number. */

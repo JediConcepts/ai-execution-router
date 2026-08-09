@@ -54,12 +54,56 @@ rather than left in the diff. See *Rule changes → Capability refusal*.
 - Errors now carry `status`, `providerCode`, `body`, and `requestId`, so callers no
   longer have to recover a failure category by pattern-matching an error message.
 
+### Fixed (second pass, after independent code review)
+
+An independent review of the branch found ten issues; all ten are addressed here.
+Two were the same class of bug this release set out to fix, still present on paths
+it had not covered:
+
+- **The streaming path had no in-body error detection at all.** An `{"error":{…}}`
+  frame mid-stream — or Anthropic's `event: error` — was swallowed and the
+  truncated text returned as a success. The buffered path was fixed; the streamed
+  path was not. Error frames now raise.
+- **In-body errors were always classified transient.** The synthetic 502 used for
+  a body-delivered error skipped the quota/context/model checks, so a spent-quota
+  message in a 200 body produced a `TransientError` — the retry-forever behaviour
+  `QuotaExhaustedError` exists to prevent. `classifyBodyError` now matches on the
+  message directly, since a committed 200 has thrown the status channel away.
+- **`retry-after` was honoured with no ceiling.** `Retry-After: 3600` blocked
+  `complete()` for an hour when no `timeoutMs` was set. Waits beyond 60s now
+  rethrow with `retryAfterMs` intact: a long wait is a failover decision.
+- **`{"error": {}}` discarded good completions.** Some proxies always include the
+  key. Detection now requires a non-empty message or code.
+- **Anthropic sent `x-api-key: ""`** when the caller authenticated by header — the
+  case `resolveEndpoint` explicitly permits. `google-genai` already guarded this;
+  Anthropic now does too.
+- **`provider in PROVIDERS`** walked the prototype chain, so `"toString"` passed
+  validation and died later as a `TypeError`. Now `Object.hasOwn`.
+- **Google's buffered path leaked reasoning traces.** Streaming skipped
+  `thought: true` parts; buffered did not, so the same request returned different
+  text depending on whether `onDelta` was passed.
+- **Streaming discarded the header request id**, leaving `providerRequestId`
+  undefined for endpoints that only report it there — a hole in the invoice
+  reconciliation this release advertises.
+- **The Bedrock and Vertex-Anthropic claim was false.** `ARCHITECTURE.md`, the
+  README, and the provider header all said both were reachable via `baseUrl` +
+  `headers`. They are not: Bedrock uses `/model/{id}/invoke` with
+  `anthropic_version` in the body, Vertex uses `:rawPredict`. The claim is
+  withdrawn and recorded under *Known gaps*. Vertex's Gemini surface genuinely
+  does work and is tested.
+- **`onUsage` throwing destroys a completion the caller already paid for.**
+  Reviewed and kept, now documented as deliberate: it runs on the success path
+  where a silent billing-write failure is the worse outcome, and awaiting it gives
+  a slow sink backpressure. `onAttempt` is swallowed because it runs on the
+  failure path, where throwing would destroy the provider's real error. Callers
+  who prefer the text can catch inside their own callback.
+
 ### Added
 
 - `google-genai` wire shape (Gemini Developer API and Vertex AI). `router.ts` gained
   one row in a lookup table and no branches.
 - `endpoint.headers` — transport auth the router does not perform: Cloudflare Access
-  service tokens, Azure `api-key`, a Vertex or Bedrock bearer minted by the controller.
+  service tokens, Azure `api-key`, a Vertex bearer minted by the controller.
   An `authorization` header now counts as the credential, so `apiKey` may be omitted.
 - Multimodal `ContentBlock[]` message content (text / image / document), translated per
   wire shape.

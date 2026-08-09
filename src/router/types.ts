@@ -152,7 +152,19 @@ export interface CompleteParams {
    */
   onDelta?: (delta: string) => void;
 
-  /** Emitted once, on success only. Safe to bill from. */
+  /**
+   * Emitted once, on success only. Safe to bill from.
+   *
+   * Unlike `onAttempt`, a throwing or rejecting `onUsage` **does** fail the
+   * call, and the completion text is lost. The asymmetry is deliberate: this
+   * sink runs on the success path, where a silent failure to record a billable
+   * call is the more expensive outcome, and awaiting it gives a slow sink real
+   * backpressure. `onAttempt` runs on the failure path, where throwing would
+   * replace the provider's real error with the sink's own.
+   *
+   * If losing the text matters more to you than a loud billing failure, catch
+   * inside your own callback — the router will not decide that trade for you.
+   */
   onUsage?: (record: UsageRecord) => void | Promise<void>;
   /**
    * Emitted once per attempt, including failures and including each leg of the

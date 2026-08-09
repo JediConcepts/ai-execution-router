@@ -71,9 +71,12 @@ The caller reads `process.env`. The router does not.
 
 | Wire shape | Reached by |
 |---|---|
-| `anthropic` | Anthropic, AWS Bedrock, Vertex |
+| `anthropic` | Anthropic, and gateways proxying the Messages API verbatim |
 | `openai-chat` | OpenAI, Azure, NVIDIA NIM, Groq, OpenRouter, Together, Fireworks, DeepSeek, xAI, Mistral, Ollama, LM Studio, vLLM, local CLI bridges |
-| `google-genai` | Gemini Developer API, Vertex |
+| `google-genai` | Gemini Developer API, Vertex AI |
+
+Bedrock and Vertex's *Anthropic* surface are **not** reachable by `baseUrl` alone —
+both use a different path and body convention. Vertex's Gemini surface is.
 
 Most of that list needs no code — only a `baseUrl`:
 

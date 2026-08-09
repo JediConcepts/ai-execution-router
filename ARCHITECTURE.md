@@ -69,17 +69,31 @@ This is the rule that keeps the exclusion list above enforceable. A "provider" i
 
 | Wire shape | Served by |
 |---|---|
-| `anthropic` | Anthropic, AWS Bedrock, GCP Vertex |
+| `anthropic` | Anthropic, and any gateway proxying the Messages API verbatim |
 | `openai-chat` | OpenAI, Azure, NVIDIA NIM, Groq, OpenRouter, Together, Fireworks, DeepSeek, xAI, Mistral, Cerebras, Ollama, LM Studio, vLLM, local CLI bridges |
 | `google-genai` | Gemini Developer API, GCP Vertex |
 
 Three consequences follow, and each one is a test the design must keep passing:
 
 1. **Adding a supplier is a `baseUrl`, not a code change.** Most of the ecosystem is reachable today without touching this repository. If onboarding a vendor requires editing a provider, ask first whether it genuinely speaks a fourth schema.
-2. **The same vendor can appear under two shapes.** Vertex serves both `anthropic` and `google-genai`. A vendor-keyed abstraction cannot express that; a schema-keyed one does so for free.
+2. **The same vendor can appear under two shapes.** Vertex serves Anthropic models *and* Gemini, under two different schemas. A vendor-keyed abstraction cannot express that; a schema-keyed one does so for free. (In practice the router reaches Vertex's `google-genai` surface today. Its Anthropic surface uses a different path and body convention — see *Known gaps*.)
 3. **Deployment facts stay outside.** Free-tier throughput ceilings, per-key rate limits, credit balances, and model context windows are properties of *an account on a serving tier*, not of a schema. They belong to the controller, and the router has no table for them.
 
 A concrete test of the boundary: **Vertex AI authenticates with an OAuth bearer token, not an API key.** Minting one requires ambient credentials, and the router reads no ambient state. The controller acquires the token and passes it via `endpoint.headers`. The router gained no knowledge of Google, GCP, or OAuth — the boundary absorbed a new auth model without moving.
+
+### Known gaps
+
+Being specific about what "reachable by `baseUrl`" does **not** cover, so nobody
+follows the table above into a 404:
+
+- **AWS Bedrock** posts to `/model/{modelId}/invoke`, wants `anthropic_version` in
+  the body, and rejects a `model` field. Also SigV4, not bearer auth.
+- **Vertex AI's Anthropic surface** posts to
+  `…/publishers/anthropic/models/{model}:rawPredict`.
+
+Both serve Anthropic models but neither serves the Messages shape at the path this
+router uses. They need dedicated variants, not configuration. Vertex's *Gemini*
+surface is reachable today, and is tested.
 
 ---
 
@@ -146,7 +160,7 @@ complete({
 - **`model`** — a fully resolved model identifier. The caller is responsible for resolution. The router does not understand task-to-model mapping, preferences, or overrides.
 - **`input`** — provider-neutral message structure. `content` is a string or an ordered list of content blocks. A trailing `assistant` message passes through verbatim, which is how an assistant prefill works; no dedicated parameter exists for it.
 - **`temperature`**, **`maxTokens`** — provider-standard knobs. Passed through without interpretation.
-- **`endpoint`** — `{ provider, baseUrl?, apiKey, headers? }`. `provider` is a **wire shape** and is required; there is no inference. `headers` merge over the router's own and are the seam for auth the router does not perform (Cloudflare Access, Azure `api-key`, a Vertex or Bedrock bearer minted by the controller).
+- **`endpoint`** — `{ provider, baseUrl?, apiKey, headers? }`. `provider` is a **wire shape** and is required; there is no inference. `headers` merge over the router's own and are the seam for auth the router does not perform (Cloudflare Access, Azure `api-key`, a Vertex bearer minted by the controller).
 - **`timeoutMs`** / **`signal`** — composed into a single deadline. A timeout raises `TimeoutError` (transient); a caller abort raises `CancelledError` (never retried). Unset means no router-imposed deadline.
 - **`onDelta`** — switches the provider to its streaming transport. It does **not** change the return type: `complete()` still resolves to exactly one `CompleteResult`. Streaming is an observation channel, not a second execution model, because one call must remain auditable as one record.
 - **`onUsage`** — fires once, on success only. Safe to bill from.

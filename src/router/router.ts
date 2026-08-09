@@ -35,6 +35,16 @@ const PROVIDERS: Record<WireShape, () => Provider> = {
   "google-genai": () => new GoogleGenAIProvider(),
 };
 
+/**
+ * The longest the router will block on a provider's `retry-after`.
+ *
+ * The router's one retry exists for short protocol-level limits — the "you are
+ * one request ahead of yourself, wait two seconds" case. Anything beyond this is
+ * a capacity or quota problem, and choosing to wait it out is a decision with
+ * cost and latency consequences: the controller's call, not the kernel's.
+ */
+const MAX_RETRY_AFTER_MS = 60_000;
+
 interface ResolvedEndpoint {
   wireShape: WireShape;
   baseUrl?: string;
@@ -75,6 +85,12 @@ export async function complete(params: CompleteParams): Promise<CompleteResult> 
       // from the provider. Anything else — including a 429 that turned out to be
       // spent quota — is a failover decision, and failover is the controller's.
       if (!(err instanceof RateLimitError) || typeof err.retryAfterMs !== "number") throw err;
+      // A long retry-after is the provider saying "not for a while", which is a
+      // failover question, not a sleep. Blocking a library call for an hour is
+      // never the caller's intent, and with no `timeoutMs` set nothing would
+      // interrupt it. Hand the error back with `retryAfterMs` intact and let the
+      // controller decide whether that wait is worth taking.
+      if (err.retryAfterMs > MAX_RETRY_AFTER_MS) throw err;
       await sleep(err.retryAfterMs, deadline.signal);
       result = await attempt(call, 2, params, provider.wireShape);
     }
@@ -268,7 +284,10 @@ function normaliseWireShape(provider: string | undefined): WireShape | undefined
   if (!provider) return undefined;
   // Pre-1.0 spelling, kept working rather than broken for cosmetics.
   if (provider === "openai-compatible") return "openai-chat";
-  if (provider in PROVIDERS) return provider as WireShape;
+  // `in` walks the prototype chain, so "toString" and "constructor" would pass
+  // and then die deeper with a TypeError. Untyped JS callers deserve the same
+  // clear PermanentError that TypeScript gives at compile time.
+  if (Object.hasOwn(PROVIDERS, provider)) return provider as WireShape;
   throw new PermanentError(
     `Unknown endpoint.provider "${provider}". Expected one of: ${Object.keys(PROVIDERS).join(", ")}.`,
   );

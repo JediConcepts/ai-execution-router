@@ -31,7 +31,7 @@ import type {
   ResponseFormat,
 } from "../types.ts";
 import { PermanentError } from "../errors.ts";
-import { mergeHeaders, postJson, postSse, tokenSourceOf } from "../http.ts";
+import { hasCallerAuth, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -86,7 +86,11 @@ export class GoogleGenAIProvider implements Provider {
     throwIfPromptBlocked(json);
 
     const candidate = json.candidates?.[0];
+    // `thought: true` parts are reasoning traces, not answer text. The streaming
+    // path already skips them; without the same filter here the identical
+    // request would return different text depending on whether onDelta was passed.
     const text = (candidate?.content?.parts ?? [])
+      .filter((part) => part.thought !== true)
       .map((part) => part.text ?? "")
       .join("");
 
@@ -99,20 +103,22 @@ export class GoogleGenAIProvider implements Provider {
   }
 
   private async stream(
-    request: Parameters<typeof postSse>[0],
+    request: Parameters<typeof openSse>[0],
     onDelta: (delta: string) => void,
   ): Promise<ProviderCallResult> {
     let text = "";
     let finishReason: string | undefined;
-    let responseId: string | undefined;
     // Every frame repeats cumulative usage; the last one seen is authoritative.
     let usage: UsageMetadata | undefined;
     let sawCandidate = false;
     let blocked: GenerateContentResponse | undefined;
 
-    for await (const raw of postSse(request)) {
+    const { requestId, frames } = await openSse(request);
+    let responseId: string | undefined;
+
+    for await (const raw of frames) {
       const chunk = raw as GenerateContentResponse;
-      if (chunk.responseId) responseId = chunk.responseId;
+      responseId ??= chunk.responseId;
       if (chunk.usageMetadata) usage = chunk.usageMetadata;
       if (chunk.promptFeedback?.blockReason) blocked = chunk;
 
@@ -130,7 +136,8 @@ export class GoogleGenAIProvider implements Provider {
 
     if (!sawCandidate && blocked) throwIfPromptBlocked(blocked);
 
-    return { text, ...usageOf(usage), finishReason, providerRequestId: responseId };
+    // Google reports its own id in the payload; the header is the fallback.
+    return { text, ...usageOf(usage), finishReason, providerRequestId: responseId ?? requestId };
   }
 }
 
@@ -158,8 +165,7 @@ function buildHeaders(
   // Vertex authenticates with a bearer token instead of an API key. When the
   // caller supplies one, sending a stray `x-goog-api-key` alongside it is at
   // best noise and at worst a rejected request.
-  const callerAuthenticates = Object.keys(extra ?? {}).some((k) => k.toLowerCase() === "authorization");
-  if (!callerAuthenticates) base["x-goog-api-key"] = apiKey;
+  if (!hasCallerAuth(extra)) base["x-goog-api-key"] = apiKey;
   return mergeHeaders(base, extra);
 }
 

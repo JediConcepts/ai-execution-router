@@ -17,7 +17,7 @@ import type {
   ResponseFormat,
 } from "../types.ts";
 import { PermanentError } from "../errors.ts";
-import { mergeHeaders, postJson, postSse, tokenSourceOf } from "../http.ts";
+import { mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 /**
  * No `multimodal-document`: document/file parts are not part of the chat
@@ -85,17 +85,19 @@ export class OpenAIChatProvider implements Provider {
   }
 
   private async stream(
-    request: Parameters<typeof postSse>[0],
+    request: Parameters<typeof openSse>[0],
     onDelta: (delta: string) => void,
   ): Promise<ProviderCallResult> {
     let text = "";
     let finishReason: string | undefined;
-    let id: string | undefined;
     let usage: OpenAIUsage | undefined;
 
-    for await (const raw of postSse(request)) {
+    const { requestId, frames } = await openSse(request);
+    let id: string | undefined = requestId;
+
+    for await (const raw of frames) {
       const chunk = raw as OpenAIStreamChunk;
-      if (chunk.id) id = chunk.id;
+      id ??= chunk.id;
       // The usage-bearing frame typically carries an empty `choices` array.
       if (chunk.usage) usage = chunk.usage;
       const choice = chunk.choices?.[0];

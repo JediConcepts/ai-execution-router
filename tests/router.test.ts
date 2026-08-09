@@ -816,3 +816,155 @@ test("a streamed call that exhausts quota is not retried either", async () => {
     m.restore();
   }
 });
+
+// ─── Review follow-ups ────────────────────────────────────────────────────────
+
+test("an in-body quota message is a QuotaExhaustedError, not a transient one", async () => {
+  // The status line was thrown away by whatever committed to the 200, so the
+  // condition has to be recovered from the message itself.
+  const m = mockFetch([
+    {
+      status: 200,
+      body: {
+        choices: [{ message: { content: "" } }],
+        error: { message: "You exceeded your current quota, please check your plan and billing details." },
+      },
+    },
+  ]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI }),
+      (err: Error) => err instanceof QuotaExhaustedError && !(err instanceof TransientError),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("an always-present but empty error field does not discard a good completion", async () => {
+  // Several OpenAI-compatible proxies always include `error`, populating it only
+  // on failure. Presence alone must not be treated as a failure.
+  const m = mockFetch([
+    { status: 200, body: { choices: [{ message: { content: "fine" } }], error: {} } },
+  ]);
+  try {
+    const r = await complete({ model: "m", input: HI, endpoint: OAI });
+    assert.equal(r.text, "fine");
+  } finally {
+    m.restore();
+  }
+});
+
+test("an error frame mid-stream raises instead of truncating into a success", async () => {
+  const frames = [
+    'data: {"id":"c1","choices":[{"delta":{"content":"par"}}]}',
+    'data: {"error":{"message":"upstream exploded","type":"server_error"}}',
+  ].join("\n\n") + "\n\n";
+  const m = mockFetch([{ status: 200, body: frames, contentType: SSE }]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} }),
+      (err: Error) => /upstream exploded/.test(err.message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("an anthropic error event mid-stream raises", async () => {
+  const frames = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":3}}}',
+    'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+  ].join("\n\n") + "\n\n";
+  const m = mockFetch([{ status: 200, body: frames, contentType: SSE }]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: ANTHROPIC, onDelta: () => {} }),
+      (err: Error) => /Overloaded/.test(err.message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("a long retry-after is handed back rather than slept through", async () => {
+  const m = mockFetch([
+    { status: 429, headers: { "retry-after": "3600" }, body: { error: { message: "come back later" } } },
+  ]);
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: ANTHROPIC }),
+      (err: Error) => err instanceof RateLimitError && (err as RateLimitError).retryAfterMs === 3_600_000,
+    );
+    assert.equal(m.calls.length, 1, "must not retry");
+    assert.ok(Date.now() - startedAt < 1000, "must not block on the wait");
+  } finally {
+    m.restore();
+  }
+});
+
+test("anthropic omits x-api-key when the caller brought a bearer", async () => {
+  const m = mockFetch([ANTHROPIC_OK]);
+  try {
+    await complete({
+      model: "m",
+      input: HI,
+      endpoint: {
+        provider: "anthropic",
+        baseUrl: "https://gateway.internal/anthropic",
+        headers: { authorization: "Bearer gw-token" },
+      },
+    });
+    assert.equal(m.calls[0].headers.get("x-api-key"), null);
+    assert.equal(m.calls[0].headers.get("authorization"), "Bearer gw-token");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a prototype-chain key is rejected as an unknown provider", async () => {
+  for (const bogus of ["toString", "constructor"]) {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: { provider: bogus as never, apiKey: "k" } }),
+      (err: Error) => err instanceof PermanentError && /Unknown endpoint\.provider/.test(err.message),
+    );
+  }
+});
+
+test("google-genai skips thought parts on the buffered path too", async () => {
+  const m = mockFetch([
+    {
+      status: 200,
+      body: {
+        candidates: [
+          {
+            content: { parts: [{ text: "internal musing", thought: true }, { text: "the answer" }] },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2 },
+      },
+    },
+  ]);
+  try {
+    const r = await complete({ model: "gemini-x", input: HI, endpoint: GEMINI });
+    assert.equal(r.text, "the answer", "reasoning traces must not leak into the answer");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a streamed call still reports a header-only request id", async () => {
+  const frames =
+    'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+  const m = mockFetch([
+    { status: 200, body: frames, contentType: SSE, headers: { "x-request-id": "req_stream_1" } },
+  ]);
+  try {
+    const r = await complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} });
+    assert.equal(r.providerRequestId, "req_stream_1");
+  } finally {
+    m.restore();
+  }
+});

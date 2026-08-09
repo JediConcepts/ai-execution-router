@@ -240,6 +240,36 @@ export function classifyHttpError(
   return new LLMError(message, cause, d);
 }
 
+/**
+ * Classify an error the provider put in the body rather than in the status line.
+ *
+ * There is no meaningful status to classify on here — a proxy that already
+ * committed to HTTP 200 has thrown that channel away — so the three conditions
+ * whose remedy differs are matched on the message directly, before falling back
+ * to whatever status the payload claimed.
+ *
+ * Without this, a spent-quota message delivered in a 200 body would be reported
+ * as transient, and a controller would back off and retry an endpoint that has
+ * nothing left to give: exactly the failure `QuotaExhaustedError` exists to stop.
+ */
+export function classifyBodyError(message: string, details: ErrorDetails = {}): LLMError {
+  const haystack = `${message} ${details.body ?? ""}`;
+  if (isQuotaExhaustion(haystack, details.providerCode)) {
+    return new QuotaExhaustedError(message, undefined, details);
+  }
+  if (isContextOverflow(haystack, details.providerCode)) {
+    return new ContextLengthError(message, undefined, details);
+  }
+  if (isModelUnavailable(haystack, details.providerCode)) {
+    return new ModelUnavailableError(message, undefined, details);
+  }
+  if (typeof details.status === "number" && details.status >= 400) {
+    return classifyHttpError(details.status, undefined, message, undefined, details);
+  }
+  // A late failure behind a committed 200 is most often an upstream giving up.
+  return new TransientError(message, undefined, details);
+}
+
 function parseRetryAfter(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
