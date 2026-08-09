@@ -60,10 +60,12 @@ constraint, and SSE frames over `?alt=sse`.
 ## 2. Vertex AI
 
 This is the one worth doing carefully, because it's the case the architecture argument
-rests on: **Vertex authenticates with an OAuth bearer token, not an API key.** The
-router reads no ambient credentials by design, so the token has to be minted outside
-and passed in as a header. If that works, the execution boundary held under an auth
-model it was never built for.
+rests on: **the tested enterprise path to Vertex uses a controller-minted OAuth bearer
+rather than an API key.** (Google offers API-key auth on some Vertex surfaces too; the
+bearer is the harder case and therefore the one worth proving.) The router reads no
+ambient credentials by design, so the token has to be minted outside and passed in as a
+header. If that works, the execution boundary held under an auth model it was never
+built for.
 
 ### One-time setup
 
@@ -160,8 +162,9 @@ The bug this topology exposed was a deadline expiring *after* headers arrived. T
 exercise it:
 
 ```sh
+npm run build
 node --input-type=module -e '
-import { complete, TimeoutError } from "./src/router/index.ts";
+import { complete, TimeoutError } from "./dist/index.js";
 try {
   await complete({
     model: "sonnet",
@@ -208,7 +211,7 @@ router must say so rather than drop the constraint.
 ## Reading the output
 
 ```
-── vertex  gemini-2.5-flash
+── vertex  gemini-flash-latest
   ✓ buffered call returns text            "PONG"
   ✓ usage is reported, not invented       9 in / 3 out (reported)
   ✓ request id captured                   xTf9…
