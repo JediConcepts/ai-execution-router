@@ -17,18 +17,21 @@ This skill ships only the **execution layer**. The host project writes the **con
 |---|---|
 | Provider HTTP transport, message format translation | Router |
 | Single 429 retry when `retry-after` is supplied | Router |
-| Typed error labelling (`RateLimitError`, `TransientError`, `PermanentError`, `AuthError`) | Router |
+| Typed error labelling, carrying provider `status` / `providerCode` / `requestId` | Router |
+| Refusing parameters the wire shape cannot express (fail closed) | Router |
+| Request deadlines and caller cancellation | Router |
 | `UsageRecord` emission via callback | Router |
 | Latency, token, and finish-reason reporting | Router |
-| Catalog: model → endpoint (factual) | Router |
+| Token reporting labelled with its provenance (`tokenSource`) | Router |
 | Task → model resolution | Controller |
 | Fallback chains, provider switching | Controller |
 | Cost guards, spend caps, budgets | Controller |
 | Audit logs, decision trails | Controller |
 | Approval gates, human review | Controller |
 | Data residency, retention policy | Controller |
-| Capability negotiation (vision, tools, long context) | Controller |
-| Catalog of model preferences, cost, trust | Controller |
+| Which model is capable of what (vision, tools, long context) | Controller |
+| Any catalog: model → endpoint, preference, cost, trust | Controller |
+| Credential acquisition, key pools, key rotation | Controller |
 
 If it is a decision, it goes in the controller.
 
@@ -41,19 +44,33 @@ const result = await complete({
   task,         // optional opaque label, passed through to onUsage; never interpreted
   model,        // required; the caller resolved this
   input: { system?, messages },
-  temperature,  // optional
-  maxTokens,    // optional
-  endpoint: { provider?, baseUrl?, apiKey },
-  onUsage,      // optional callback receiving one UsageRecord on success
+  temperature,    // optional
+  maxTokens,      // optional
+  responseFormat, // optional; refused by shapes that cannot express it
+  reasoning,      // optional; { effort } or { budgetTokens } — never converted between them
+  endpoint: { provider, baseUrl?, apiKey, headers? },
+  timeoutMs,      // optional wall-clock ceiling
+  signal,         // optional caller cancellation
+  onDelta,        // optional; observe output incrementally, still one result
+  onUsage,        // optional; fires once, on success only
+  onAttempt,      // optional; fires per attempt, success or failure
 });
 ```
+
+`endpoint.provider` is a **wire shape**, not a vendor, and is required:
+`"anthropic"` | `"openai-chat"` | `"google-genai"`. Most suppliers (NVIDIA, Groq,
+OpenRouter, Together, Ollama, LM Studio, a local CLI bridge) are `openai-chat`
+plus a `baseUrl`. `endpoint.headers` carries transport auth the router does not
+perform — Cloudflare Access, Azure `api-key`, a Vertex bearer the controller minted.
 
 ### What the router does
 
 - Calls one provider, once.
 - Retries exactly once if (and only if) the provider returned 429 with an explicit `retry-after`.
-- Throws a typed error otherwise.
-- Emits one `UsageRecord` to `onUsage` on success.
+- Throws a typed error otherwise, carrying the provider's own status and code.
+- Refuses unsupported parameters by name rather than dropping them silently.
+- Reports token counts with provenance, and never estimates one.
+- Emits one `UsageRecord` on success, and one `AttemptRecord` per attempt.
 
 ### What the router does not do
 
@@ -79,7 +96,7 @@ const r = await complete({
     system: "You are a concise summarizer.",
     messages: [{ role: "user", content: "What is the capital of France?" }],
   },
-  endpoint: { apiKey },
+  endpoint: { provider: "anthropic", apiKey },
 });
 
 console.log(r.text);
@@ -120,10 +137,20 @@ See `reference/INTEGRATION.md` for:
 
 | Error class | Meaning | Caller's typical decision |
 |---|---|---|
-| `RateLimitError` | Provider returned 429 | Try a different provider, queue, or fail |
-| `TransientError` | Network drop, socket reset, 5xx | Retry once, fall back, or fail |
-| `PermanentError` | Model not found, context overflow, malformed request | Pick a different model or fail |
+| `RateLimitError` | 429, transient | Wait, queue, or route elsewhere |
+| `QuotaExhaustedError` | 429/402 where credit is spent. A `PermanentError`, **not** a `RateLimitError` | Fail over now — waiting cannot help |
+| `TransientError` | Network drop, socket reset, 5xx, malformed body | Retry once, fall back, or fail |
+| `TimeoutError` | `timeoutMs` elapsed. A `TransientError` | Retry, perhaps with a longer deadline |
+| `ContextLengthError` | Input exceeded the context window. A `PermanentError` | Try a larger-context candidate |
+| `ModelUnavailableError` | Unknown or retired model. A `PermanentError` | Substitute a model |
+| `UnsupportedCapabilityError` | The wire shape cannot express a parameter. A `PermanentError` | Fix the request or change shape |
+| `CancelledError` | The caller's `signal` aborted | Nothing — the caller asked to stop |
 | `AuthError` | 401, 403, or missing apiKey | Surface to ops; do not retry |
+| `PermanentError` | Malformed request, unclassified 4xx | Fall back or fail |
 | `LLMError` | Catch-all base class | Inspect `cause` |
+
+`QuotaExhaustedError` deliberately does **not** extend `RateLimitError`: both are
+HTTP 429, and a controller that backs off on both will sit out a full quota window
+before failing over to a candidate that would have answered immediately.
 
 The labels are factual, not retry instructions. The decision belongs to the controller.

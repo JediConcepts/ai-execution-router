@@ -57,7 +57,7 @@ const r = await complete({
   input: {
     messages: [{ role: "user", content: "What is the capital of France?" }],
   },
-  endpoint: { apiKey },
+  endpoint: { provider: "anthropic", apiKey },
 });
 
 console.log(r.text);
@@ -65,12 +65,45 @@ console.log(r.text);
 
 The caller reads `process.env`. The router does not.
 
+## Wire shapes, not vendors
+
+`endpoint.provider` names a **request schema**, never a company. There are three:
+
+| Wire shape | Reached by |
+|---|---|
+| `anthropic` | Anthropic, AWS Bedrock, Vertex |
+| `openai-chat` | OpenAI, Azure, NVIDIA NIM, Groq, OpenRouter, Together, Fireworks, DeepSeek, xAI, Mistral, Ollama, LM Studio, vLLM, local CLI bridges |
+| `google-genai` | Gemini Developer API, Vertex |
+
+Most of that list needs no code — only a `baseUrl`:
+
+```ts
+// NVIDIA NIM, Groq, a local Ollama, or a CLI bridge on your own machine:
+endpoint: { provider: "openai-chat", baseUrl: "https://integrate.api.nvidia.com/v1", apiKey }
+
+// Vertex AI, whose bearer token the controller mints — the router reads no ambient credentials:
+endpoint: {
+  provider: "google-genai",
+  baseUrl: `https://${region}-aiplatform.googleapis.com/v1/projects/${p}/locations/${region}/publishers/google`,
+  apiKey: "",
+  headers: { authorization: `Bearer ${await adcToken()}` },
+}
+```
+
 ## What the Router Does
 
-- Calls one provider, once.
+- Calls one provider, once, and returns exactly one result — including when streaming.
 - Retries exactly once if (and only if) the provider returned `429` with an explicit `retry-after`.
-- Throws typed errors: `RateLimitError`, `TransientError`, `PermanentError`, `AuthError`, `LLMError`.
-- Emits one `UsageRecord` to the optional `onUsage` callback on success.
+- Refuses, by name, any parameter the chosen wire shape cannot express, rather than dropping it silently.
+- Throws typed errors carrying the provider's own `status`, `providerCode`, and `requestId`.
+- Reports token counts with their provenance, and **never estimates one**.
+- Emits one `UsageRecord` on success, and one `AttemptRecord` per attempt including failures.
+
+## Two things worth knowing
+
+**A 429 is two different failures.** `RateLimitError` means wait; `QuotaExhaustedError` means your credit is gone and waiting cannot help. It extends `PermanentError`, not `RateLimitError`, so a caller that backs off on rate limits does not sit out a full quota window before failing over.
+
+**`tokenSource` tells you whether to trust the numbers.** A provider that reports no usage yields zeroes marked `"unreported"` rather than an invented figure, so a cost model can decline to price the call instead of pricing a guess.
 
 ## What the Router Does NOT Do
 
