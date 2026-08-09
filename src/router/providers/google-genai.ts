@@ -60,6 +60,10 @@ export class GoogleGenAIProvider implements Provider {
     if (p.temperature !== undefined) generationConfig.temperature = p.temperature;
     if (p.responseFormat) Object.assign(generationConfig, toGenerationFormat(p.responseFormat));
     if (p.reasoning?.budgetTokens !== undefined) {
+      // `thinkingBudget` is the Gemini 2.5-lineage control. If a newer model
+      // family replaces it with a coarse level, that needs its own field —
+      // quietly mapping a token budget onto a level would be the router making
+      // a cost/quality judgement on the caller's behalf.
       generationConfig.thinkingConfig = { thinkingBudget: p.reasoning.budgetTokens };
     }
 
@@ -85,7 +89,9 @@ export class GoogleGenAIProvider implements Provider {
     const { json, requestId } = await postJson<GenerateContentResponse>(request);
     throwIfPromptBlocked(json);
     // Past the block check, no candidates means no response — not a silent one.
-    if (!Array.isArray(json.candidates)) throw malformedResponse("no candidates array", json, requestId);
+    if (!Array.isArray(json.candidates) || json.candidates.length === 0) {
+      throw malformedResponse("no candidates returned", json, requestId);
+    }
 
     const candidate = json.candidates[0];
     // `thought: true` parts are reasoning traces, not answer text. The streaming
@@ -137,6 +143,14 @@ export class GoogleGenAIProvider implements Provider {
     }
 
     if (!sawCandidate && blocked) throwIfPromptBlocked(blocked);
+    // Google sends no `[DONE]`; the last candidate's finishReason is the marker.
+    if (!finishReason) {
+      throw malformedResponse(
+        "stream ended without a finishReason — the connection closed mid-answer",
+        { text },
+        requestId,
+      );
+    }
 
     // Google reports its own id in the payload; the header is the fallback.
     return { text, ...usageOf(usage), finishReason, providerRequestId: responseId ?? requestId };

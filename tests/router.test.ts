@@ -1113,3 +1113,177 @@ test("a deadline that expires during the body read is still a TimeoutError", asy
     globalThis.fetch = realFetchRef;
   }
 });
+
+// ─── Third review round (Codex, against the pushed branch) ────────────────────
+
+test("a stream that ends without a terminal event is a truncation, not an answer", async () => {
+  // Valid frames, clean EOF, no [DONE] and no finish reason. The socket closing
+  // is not the provider saying it finished.
+  const m = mockFetch([
+    { status: 200, contentType: SSE, body: 'data: {"choices":[{"delta":{"content":"par"}}]}\n\n' },
+  ]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} }),
+      (err: Error) => /without a terminal event/.test(err.message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("a terminal marker — [DONE] or a finish reason — is enough on its own", async () => {
+  for (const body of [
+    'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+    'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
+  ]) {
+    const m = mockFetch([{ status: 200, contentType: SSE, body }]);
+    try {
+      const r = await complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} });
+      assert.equal(r.text, "ok");
+    } finally {
+      m.restore();
+    }
+  }
+});
+
+test("anthropic and google also require their own terminal markers", async () => {
+  const cases: Array<[typeof ANTHROPIC | typeof GEMINI, string]> = [
+    [ANTHROPIC, 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'],
+    [GEMINI, 'data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}\n\n'],
+  ];
+  for (const [endpoint, body] of cases) {
+    const m = mockFetch([{ status: 200, contentType: SSE, body }]);
+    try {
+      await assert.rejects(
+        () => complete({ model: "m", input: HI, endpoint, onDelta: () => {} }),
+        (err: Error) => /terminal event|finishReason/.test(err.message),
+      );
+    } finally {
+      m.restore();
+    }
+  }
+});
+
+test("an empty choices/candidates/content array is not an empty answer", async () => {
+  const cases: Array<[typeof OAI | typeof ANTHROPIC | typeof GEMINI, unknown]> = [
+    [OAI, { choices: [] }],
+    [ANTHROPIC, { content: [] }],
+    [GEMINI, { candidates: [] }],
+  ];
+  for (const [endpoint, body] of cases) {
+    const m = mockFetch([{ status: 200, body }]);
+    try {
+      await assert.rejects(
+        () => complete({ model: "m", input: HI, endpoint }),
+        (err: Error) => /malformed provider response/.test(err.message),
+      );
+    } finally {
+      m.restore();
+    }
+  }
+});
+
+test("a body that parses but is not an object is rejected before any dereference", async () => {
+  for (const body of ["null", "[]", "42", '"hello"']) {
+    const m = mockFetch([{ status: 200, body }]);
+    try {
+      await assert.rejects(
+        () => complete({ model: "m", input: HI, endpoint: OAI }),
+        (err: Error) => /not a JSON object/.test(err.message),
+      );
+    } finally {
+      m.restore();
+    }
+  }
+});
+
+test("non-string content is refused rather than coerced into text", async () => {
+  const m = mockFetch([{ status: 200, body: { choices: [{ message: { content: 42 } }] } }]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI }),
+      (err: Error) => /content is number, not a string/.test(err.message),
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("openai-chat sends no empty bearer when authenticating by api-key", async () => {
+  const m = mockFetch([OAI_OK]);
+  try {
+    await complete({
+      model: "m",
+      input: HI,
+      endpoint: { provider: "openai-chat", baseUrl: "https://az.test/v1", headers: { "api-key": "secret" } },
+    });
+    assert.equal(m.calls[0].headers.get("authorization"), null, "must not send 'Bearer '");
+    assert.equal(m.calls[0].headers.get("api-key"), "secret");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a deadline expiring while the ERROR body is read is still a TimeoutError", async () => {
+  const realFetchRef = globalThis.fetch;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("upstream is "));
+          init?.signal?.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            controller.error(err);
+          });
+        },
+      }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: OAI, timeoutMs: 30 }),
+      (err: Error) => err instanceof TimeoutError,
+    );
+  } finally {
+    globalThis.fetch = realFetchRef;
+  }
+});
+
+test("an async onAttempt sink is awaited, so its record cannot be lost", async () => {
+  const m = mockFetch([ANTHROPIC_OK]);
+  const written: string[] = [];
+  try {
+    await complete({
+      model: "m",
+      input: HI,
+      endpoint: ANTHROPIC,
+      onAttempt: async (r) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        written.push(r.outcome);
+      },
+    });
+    assert.deepEqual(written, ["success"], "the write must have completed before complete() resolved");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a rejecting async onAttempt still cannot mask the provider's error", async () => {
+  const m = mockFetch([{ status: 401, body: { error: { message: "bad key" } } }]);
+  try {
+    await assert.rejects(
+      () =>
+        complete({
+          model: "m",
+          input: HI,
+          endpoint: ANTHROPIC,
+          onAttempt: async () => { throw new Error("sink down"); },
+        }),
+      AuthError,
+    );
+  } finally {
+    m.restore();
+  }
+});

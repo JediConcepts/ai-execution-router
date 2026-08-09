@@ -144,7 +144,7 @@ async function attempt(
   const startedAt = Date.now();
   try {
     const result = await call();
-    void report(params.onAttempt, {
+    await report(params.onAttempt, {
       task: params.task,
       model: params.model,
       wireShape,
@@ -164,7 +164,7 @@ async function attempt(
     });
     return result;
   } catch (err) {
-    void report(params.onAttempt, {
+    await report(params.onAttempt, {
       task: params.task,
       model: params.model,
       wireShape,
@@ -182,22 +182,24 @@ async function attempt(
 }
 
 /**
- * Audit callbacks never change control flow.
+ * Deliver an attempt record: awaited, but never able to change control flow.
  *
- * `onAttempt` fires on the failure path, so a throwing sink would replace the
- * provider's real error with its own — the diagnostic equivalent of losing the
- * evidence while filing the report.
+ * Awaited because fire-and-forget loses records. An async sink writing to a file
+ * or a queue would still be in flight when `complete()` returned, and a process
+ * that exits promptly afterwards drops exactly the attempts most worth keeping —
+ * the failures that made it exit.
+ *
+ * Swallowed because `onAttempt` also fires on the failure path, where a throwing
+ * sink would replace the provider's real error with its own: losing the evidence
+ * while filing the report.
  */
-function report(
+async function report(
   sink: ((record: AttemptRecord) => void | Promise<void>) | undefined,
   record: AttemptRecord,
-): void {
+): Promise<void> {
   if (!sink) return;
   try {
-    const maybe = sink(record);
-    if (maybe && typeof (maybe as Promise<void>).catch === "function") {
-      (maybe as Promise<void>).catch(() => {});
-    }
+    await sink(record);
   } catch {
     /* an audit sink must not be able to fail the call it is observing */
   }

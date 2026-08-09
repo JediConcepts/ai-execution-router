@@ -21,7 +21,7 @@ export async function ask(prompt: string): Promise<string> {
     task: "ask",
     model: "claude-haiku-4-5",
     input: { messages: [{ role: "user", content: prompt }] },
-    endpoint: { apiKey },
+    endpoint: { provider: "anthropic", apiKey },
   });
   return r.text;
 }
@@ -49,7 +49,7 @@ async function run(task: TaskName, prompt: string) {
     task,
     model: TASK_MODELS[task],
     input: { messages: [{ role: "user", content: prompt }] },
-    endpoint: { apiKey: keyFor(TASK_MODELS[task]) },
+    endpoint: { provider: "anthropic", apiKey: keyFor(TASK_MODELS[task]) },
   });
 }
 ```
@@ -88,7 +88,7 @@ export async function callWithFallback(
         task,
         model: a.model,
         input: { messages: [{ role: "user", content: prompt }] },
-        endpoint: { apiKey: a.apiKey },
+        endpoint: a.endpoint,   // { provider, baseUrl?, apiKey } — resolved by the controller
       });
       return r.text;
     } catch (err) {
@@ -129,7 +129,7 @@ await complete({
   task: "ping",
   model: "claude-haiku-4-5",
   input: { messages: [{ role: "user", content: "Reply with: pong" }] },
-  endpoint: { apiKey: process.env.ANTHROPIC_API_KEY! },
+  endpoint: { provider: "anthropic", apiKey: process.env.ANTHROPIC_API_KEY! },
   onUsage: logUsage,
 });
 ```
@@ -152,7 +152,7 @@ async function ask(task: string, prompt: string): Promise<string> {
     task,
     model: pickModel(task),
     input: { messages: [{ role: "user", content: prompt }] },
-    endpoint: { apiKey: keyFor(task) },
+    endpoint: { provider: "anthropic", apiKey: keyFor(task) },
     onUsage: recordUsage,
   });
   await audit(task, r);            // post-call hook in controller

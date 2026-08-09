@@ -37,7 +37,10 @@
   "files": [
     "dist",
     "src",
-    "ARCHITECTURE.md"
+    "scripts",
+    "docs",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md"
   ],
   "sideEffects": false,
   "scripts": {

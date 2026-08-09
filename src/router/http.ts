@@ -132,8 +132,21 @@ function safeStringify(value: unknown): string | undefined {
   }
 }
 
-async function readErrorResponse(response: Response, requestId: string | undefined): Promise<never> {
-  const text = await response.text().catch(() => "");
+async function readErrorResponse(
+  response: Response,
+  requestId: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<never> {
+  let text = "";
+  try {
+    text = await response.text();
+  } catch (err) {
+    // A deadline that expires while the error body is being read is still a
+    // deadline. Swallowing it here reported the original status instead, so a
+    // timeout against a slow 503 surfaced as a plain TransientError.
+    const aborted = classifyAbort(err, signal);
+    if (aborted) throw aborted;
+  }
   let providerCode: string | undefined;
   try {
     const parsed = JSON.parse(text) as { error?: { code?: string; type?: string; message?: string } };
@@ -154,7 +167,7 @@ async function readErrorResponse(response: Response, requestId: string | undefin
 export async function postJson<T>(p: HttpPostParams): Promise<{ json: T; requestId?: string }> {
   const response = await doFetch(p);
   const requestId = readRequestId(response, p.requestIdHeaders ?? DEFAULT_REQUEST_ID_HEADERS);
-  if (!response.ok) await readErrorResponse(response, requestId);
+  if (!response.ok) await readErrorResponse(response, requestId, p.signal);
 
   const raw = await readBodyText(response, p.signal, requestId);
   let json: T;
@@ -167,6 +180,11 @@ export async function postJson<T>(p: HttpPostParams): Promise<{ json: T; request
       requestId,
     });
   }
+  // `null`, an array, a bare number — all parse, none are a response. Rejecting
+  // them centrally also stops every provider dereferencing null.
+  if (typeof json !== "object" || json === null || Array.isArray(json)) {
+    throw malformedResponse("body is not a JSON object", json, requestId);
+  }
   throwIfBodyError(json, { status: response.status, requestId });
   return { json, requestId };
 }
@@ -175,6 +193,15 @@ export interface SseStream {
   /** Read from the response headers, before any frame is consumed. */
   requestId?: string;
   frames: AsyncGenerator<unknown, void, void>;
+  /**
+   * Set when the stream reached an explicit `data: [DONE]`.
+   *
+   * A socket closing is not the same as a provider finishing. Without a terminal
+   * marker — this, or a finish reason in the payload — the frames received so far
+   * are a fragment, and returning them as a completed answer is the truncation
+   * failure in its quietest form.
+   */
+  state: { sawDone: boolean };
 }
 
 /**
@@ -188,7 +215,7 @@ export interface SseStream {
 export async function openSse(p: HttpPostParams): Promise<SseStream> {
   const response = await doFetch(p);
   const requestId = readRequestId(response, p.requestIdHeaders ?? DEFAULT_REQUEST_ID_HEADERS);
-  if (!response.ok) await readErrorResponse(response, requestId);
+  if (!response.ok) await readErrorResponse(response, requestId, p.signal);
   if (!response.body) {
     throw classifyHttpError(502, undefined, "provider returned no body for a streaming request", undefined, {
       status: 502,
@@ -216,13 +243,15 @@ export async function openSse(p: HttpPostParams): Promise<SseStream> {
     );
   }
 
-  return { requestId, frames: readFrames(response.body, p.signal, requestId) };
+  const state = { sawDone: false };
+  return { requestId, state, frames: readFrames(response.body, p.signal, requestId, state) };
 }
 
 async function* readFrames(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
   requestId: string | undefined,
+  state: { sawDone: boolean },
 ): AsyncGenerator<unknown, void, void> {
   const decoder = new TextDecoder();
   const reader = body.getReader();
@@ -256,7 +285,10 @@ async function* readFrames(
         buffer = buffer.slice(boundary).replace(/^(\r?\n){2}/, "");
         const data = parseSseData(rawEvent);
         if (data === undefined) continue;
-        if (data === "[DONE]") return;
+        if (data === "[DONE]") {
+          state.sawDone = true;
+          return;
+        }
         let payload: unknown;
         try {
           payload = JSON.parse(data);

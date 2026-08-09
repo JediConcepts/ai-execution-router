@@ -13,16 +13,26 @@
  * Targets whose credentials are absent are skipped, not failed — run whichever
  * subset you have keys for. See docs/SMOKE_TEST.md for setup.
  *
- *   node scripts/smoke.mjs            # every configured target
- *   node scripts/smoke.mjs vertex     # just one
+ *   npm run build && npm run smoke    # every configured target
+ *   npm run smoke -- vertex           # just one
+ *
+ * It imports `dist/`, deliberately: the point is to exercise the artefact that
+ * actually ships, on the Node version consumers actually run, rather than the
+ * TypeScript sources that only the repo's own toolchain ever sees.
  */
 
-import {
-  complete,
-  LLMError,
-  ModelUnavailableError,
-  UnsupportedCapabilityError,
-} from "../src/router/index.ts";
+let complete, LLMError, ModelUnavailableError, UnsupportedCapabilityError;
+try {
+  ({ complete, LLMError, ModelUnavailableError, UnsupportedCapabilityError } = await import(
+    "../dist/index.js"
+  ));
+} catch (err) {
+  console.error(
+    "Could not load ../dist/index.js — run `npm run build` first.\n" +
+    `(${err?.message ?? err})`,
+  );
+  process.exit(1);
+}
 
 const PROMPT = { messages: [{ role: "user", content: "Reply with exactly: PONG" }] };
 const MAX_TOKENS = 32;
@@ -280,4 +290,20 @@ if (failures.length) {
   for (const f of failures) console.log(`  • ${f.what} — ${f.detail}`);
   process.exit(1);
 }
-console.log("\x1b[32mAll good.\x1b[0m Safe to promote the candidate to `latest`.");
+if (selected.length < all.length || only.length > 0) {
+  console.log(
+    `\x1b[32mAll selected checks passed.\x1b[0m ` +
+    `${selected.length} of ${all.length} configured target(s) ran — this is not yet a\n` +
+    "promotion signal. Work the checklist at the end of docs/SMOKE_TEST.md.",
+  );
+} else if (warnings.length) {
+  console.log(
+    "\x1b[32mAll checks passed\x1b[0m, with warnings above. Confirm each warning is\n" +
+    "expected for that endpoint before promoting.",
+  );
+} else {
+  console.log(
+    "\x1b[32mAll good.\x1b[0m Every configured target passed cleanly. Check the\n" +
+    "docs/SMOKE_TEST.md list covers the targets you intend to support, then promote.",
+  );
+}

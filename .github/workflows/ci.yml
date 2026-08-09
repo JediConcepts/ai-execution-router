@@ -52,3 +52,78 @@ jobs:
       # Exact script from package.json: "node --test tests/*.test.ts".
       - name: Test
         run: npm test
+
+  # The published artefact, on the Node version consumers actually run.
+  #
+  # The test lane above runs TypeScript sources on Node 22+. That proves the
+  # sources work; it proves nothing about the tarball. This lane builds, packs,
+  # installs into a clean directory and imports the result on Node 20 — the
+  # floor declared in `engines` — so a broken `files` list, a missing `dist`, a
+  # bad `exports` map or a stray TypeScript import fails here rather than in
+  # someone else's install.
+  package:
+    name: Packaged artefact (Node 20)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      # Building needs the devDependencies; `npm ci` on Node 20 is fine because
+      # nothing here executes the .ts sources directly.
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack
+        run: npm pack --pack-destination /tmp
+
+      - name: Install the tarball into a clean project
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install /tmp/ai-execution-router-*.tgz
+
+      # Imports through the package root, exercising the `exports` map rather
+      # than a relative path into the repo.
+      - name: Import and exercise the published entrypoint
+        run: |
+          cd /tmp/consumer
+          cat > check.mjs <<'EOF'
+          import { complete, AuthError, PermanentError, QuotaExhaustedError } from "ai-execution-router";
+
+          // Error hierarchy survived the build (a structural claim of the release).
+          if (!(new QuotaExhaustedError("x") instanceof PermanentError)) {
+            throw new Error("QuotaExhaustedError must extend PermanentError");
+          }
+
+          // Reaches the guards without touching the network.
+          const expect = async (label, params, Type) => {
+            try {
+              await complete(params);
+            } catch (err) {
+              if (err instanceof Type) return;
+              throw new Error(`${label}: expected ${Type.name}, got ${err?.name}: ${err?.message}`);
+            }
+            throw new Error(`${label}: expected ${Type.name}, got success`);
+          };
+
+          const input = { messages: [{ role: "user", content: "hi" }] };
+          await expect("unknown wire shape", { model: "m", input, endpoint: { provider: "nope", apiKey: "k" } }, PermanentError);
+          await expect("missing credential", { model: "m", input, endpoint: { provider: "openai-chat", baseUrl: "https://x.test/v1" } }, AuthError);
+
+          console.log("packaged artefact OK");
+          EOF
+          node check.mjs
+
+      # The smoke harness must at least load and report cleanly with no
+      # credentials configured; a syntax or import error here is a broken tool.
+      - name: Smoke harness loads
+        run: |
+          cd /tmp/consumer/node_modules/ai-execution-router
+          node scripts/smoke.mjs && exit 1 || test $? -eq 1

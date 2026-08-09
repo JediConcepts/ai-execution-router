@@ -166,6 +166,63 @@ same probe now reports the corrected behaviour.
 - **The Bedrock and Vertex gap list is marked dated, not authoritative.** Vendors
   keep adding compatibility surfaces; any of these may already have closed.
 
+### Fixed (fourth pass, after a third review of the pushed branch)
+
+- **A stream ending without a terminal event returned partial text as success.**
+  Valid frames followed by a clean EOF — no `[DONE]`, no finish reason — is a
+  socket closing, not a provider finishing. Each shape now requires its own
+  marker: `[DONE]` or `finish_reason` for `openai-chat`, `message_stop` or
+  `stop_reason` for `anthropic`, `finishReason` for `google-genai`.
+- **Empty `choices` / `content` / `candidates` arrays became empty answers.** The
+  previous fix required the array to exist; it must also be non-empty.
+- **A body of `null`, `[]`, or a bare scalar dereferenced or coerced.** Rejected
+  centrally in `postJson` now, before any provider touches it.
+- **Non-string content was coerced into text.** `content: 42` returned `42` as the
+  completion. Refused.
+- **`openai-chat` still sent `Authorization: Bearer ` when authenticating by
+  `api-key`.** The same empty-credential guard the other two shapes already had —
+  fixed inconsistently the first time, now applied everywhere.
+- **A deadline expiring while an ERROR body was read reported the original
+  status**, not `TimeoutError`. `readErrorResponse` swallowed the abort.
+- **`onAttempt` was fire-and-forget**, so an async sink could still be in flight
+  when `complete()` returned and lose exactly the records worth keeping — the
+  failures that made the process exit. Now awaited, still swallowed, so it gains
+  durability without gaining the ability to mask the provider's error.
+
+### Release process
+
+- `package-lock.json` now matches the package version.
+- `files` ships what the package advertises: `scripts/`, `docs/`, `CHANGELOG.md`.
+- **The smoke harness imports `dist/`, not the TypeScript sources.** It exists to
+  test the artefact that ships; importing `src/` tested something no consumer runs.
+- The harness no longer prints "safe to promote" after running a single target.
+- **New CI lane: packaged artefact on Node 20.** Builds, packs, installs the
+  tarball into a clean project, imports through the package root and exercises the
+  guards. A broken `files` list, a missing `dist`, a bad `exports` map or a stray
+  `.ts` import now fails in CI rather than in someone's install.
+
+### Governance (reversal)
+
+- **"capability negotiation" is restored to the Phase 2 gate.** Deleting it was the
+  wrong repair — it relaxed a constraint to fit an implementation. The distinction
+  that should have been drawn is now explicit: *protocol encodability* (a fixed
+  property of a schema, known at author time, no discovery) ships in Phase 1;
+  *capability negotiation* (what an endpoint, account or model supports; probing;
+  per-model tables; selection) remains Phase 2 and out of scope. The test: if
+  answering "can this be encoded?" needs anything beyond which schema is spoken, it
+  is negotiation.
+- **`docs/PHASE_2_SPEC_PLAN.md` is marked superseded**, with a table of where it
+  contradicts the implementation. It predates the wire-shape release and still
+  assumed the model catalogue.
+- **The Vertex auth claim is softened.** "OAuth, not an API key" was too absolute —
+  Google offers API-key auth on Vertex surfaces too. It now reads as the *tested
+  enterprise path*, which is the honest and still-interesting claim.
+- **`budgetTokens` is documented as the Gemini 2.5-lineage control**
+  (`thinkingConfig.thinkingBudget`). Newer families may use a coarse level instead;
+  that will need its own field rather than a silent reinterpretation of this one.
+- Stale `Capability` and `tokenSource: "provider"` references removed from the
+  docs; every skill example now shows the required `endpoint.provider`.
+
 ### Added
 
 - `google-genai` wire shape (Gemini Developer API and Vertex AI). `router.ts` gained

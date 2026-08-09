@@ -80,7 +80,9 @@ export class AnthropicProvider implements Provider {
     const { json, requestId } = await postJson<AnthropicResponse>(request);
     // See the note in openai-chat: an empty block list is an answer, an absent
     // one is a substituted body.
-    if (!Array.isArray(json.content)) throw malformedResponse("no content array", json, requestId);
+    if (!Array.isArray(json.content) || json.content.length === 0) {
+      throw malformedResponse("no content blocks returned", json, requestId);
+    }
     const text = json.content
       .filter((b): b is AnthropicTextBlock => b.type === "text")
       .map((b) => b.text)
@@ -104,6 +106,8 @@ export class AnthropicProvider implements Provider {
     // `message_start`, output tokens on the final `message_delta`.
     let usage: AnthropicUsage = {};
 
+    // Anthropic terminates with `message_stop`, never with `[DONE]`.
+    let sawStop = false;
     const { requestId, frames } = await openSse(request);
     let messageId: string | undefined = requestId;
 
@@ -128,7 +132,18 @@ export class AnthropicProvider implements Provider {
           if (event.usage) usage = { ...usage, ...event.usage };
           if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
           break;
+        case "message_stop":
+          sawStop = true;
+          break;
       }
+    }
+
+    if (!sawStop && !stopReason) {
+      throw malformedResponse(
+        "stream ended without a terminal event — the connection closed mid-answer",
+        { text },
+        requestId,
+      );
     }
 
     return {

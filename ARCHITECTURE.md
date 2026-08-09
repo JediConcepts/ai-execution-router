@@ -79,7 +79,7 @@ Three consequences follow, and each one is a test the design must keep passing:
 2. **The same vendor can appear under two shapes.** Vertex serves Anthropic models *and* Gemini, under two different schemas. A vendor-keyed abstraction cannot express that; a schema-keyed one does so for free. (In practice the router reaches Vertex's `google-genai` surface today. Its Anthropic surface uses a different path and body convention — see *Known gaps*.)
 3. **Deployment facts stay outside.** Free-tier throughput ceilings, per-key rate limits, credit balances, and model context windows are properties of *an account on a serving tier*, not of a schema. They belong to the controller, and the router has no table for them.
 
-A concrete test of the boundary: **Vertex AI authenticates with an OAuth bearer token, not an API key.** Minting one requires ambient credentials, and the router reads no ambient state. The controller acquires the token and passes it via `endpoint.headers`. The router gained no knowledge of Google, GCP, or OAuth — the boundary absorbed a new auth model without moving.
+A concrete test of the boundary: **the tested enterprise path to Vertex AI uses a controller-minted OAuth bearer rather than an API key.** (Google also offers API-key auth on some Vertex surfaces; the bearer is the harder case and therefore the one worth proving.) Minting a token requires ambient credentials, and the router reads no ambient state. The controller acquires it and passes it via `endpoint.headers`. The router gained no knowledge of Google, GCP, or OAuth — the boundary absorbed a new auth model without moving.
 
 ### Known gaps
 
@@ -225,7 +225,7 @@ interface UsageRecord {
   wireShape: WireShape;
   promptTokens: number;
   completionTokens: number;
-  tokenSource: "provider" | "partial" | "unreported";
+  tokenSource: "reported" | "partial" | "unreported";
   cachedPromptTokens?: number;
   cacheWriteTokens?: number;
   reasoningTokens?: number;
@@ -237,6 +237,8 @@ interface UsageRecord {
 ```
 
 **`tokenSource` is the most important field here.** The router never estimates. A provider that reports no usage yields zeroes marked `"unreported"`, so a downstream cost model can refuse to price the call rather than silently pricing a fabricated number. A caller that wants an estimate must make — and own — that assumption itself.
+
+`"reported"` deliberately does not say *measured*. It means the endpoint sent these numbers, and no more than that: an endpoint may itself be estimating — a CLI bridge deriving counts at roughly four characters per token because the tool it wraps reports none. The router cannot distinguish that from a metered count, so it does not claim to.
 
 Cache and reasoning token classes are reported separately because they are priced separately, often by an order of magnitude. Collapsing them into `promptTokens` produces a cost figure that is confidently wrong.
 
@@ -276,4 +278,12 @@ This document governs Phase 1.
 
 Every implementation decision in this repository must be checkable against the rules above. If a proposed change is justified by the inclusion list and does not violate the exclusion list, it is in scope. Otherwise it belongs in a controller layer outside this repository.
 
-Phase 2 (versioned spec, multi-language ports, sidecar proxy) will not begin until at least two real projects have used Phase 1 in production for thirty days.
+Phase 2 (versioned spec, **capability negotiation**, multi-language ports, sidecar proxy) will not begin until at least two real projects have used Phase 1 in production for thirty days.
+
+An earlier draft of this release deleted "capability negotiation" from that sentence, because capability declaration had shipped in Phase 1. That was the wrong repair: it relaxed a constraint to fit an implementation. The words are restored, and the distinction the draft should have drawn is made explicit instead.
+
+**Protocol encodability declaration — permitted in Phase 1, and shipped.** A provider states which request features its own wire format can encode. This is a fixed property of a schema, known at author time, requiring no discovery and no per-model data. The router already had to know it; it previously acted on that knowledge by silently discarding parameters, which is the failure `UnsupportedCapabilityError` replaces.
+
+**Capability negotiation — still Phase 2, still out of scope.** Discovering what a specific *endpoint*, *account*, or *model* supports; probing an endpoint's advertised features; maintaining per-model context windows or feature tables; selecting a model or route from any of the above. All of it is deployment fact rather than protocol fact, all of it goes stale, and all of it belongs to the controller.
+
+The test: if answering "can this be encoded?" requires knowing anything beyond which schema is being spoken, it is negotiation and it does not go here.

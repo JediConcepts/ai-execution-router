@@ -17,7 +17,7 @@ import type {
   ResponseFormat,
 } from "../types.ts";
 import { PermanentError } from "../errors.ts";
-import { malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
+import { hasCallerAuth, malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 /**
  * No `multimodal-document`: document/file parts are not part of the chat
@@ -64,10 +64,12 @@ export class OpenAIChatProvider implements Provider {
       body.stream_options = { include_usage: true };
     }
 
-    const headers = mergeHeaders(
-      { "content-type": "application/json", authorization: `Bearer ${p.apiKey}` },
-      p.headers,
-    );
+    const base: Record<string, string> = { "content-type": "application/json" };
+    // Azure authenticates with `api-key` and no bearer at all. Sending
+    // `Authorization: Bearer ` alongside it is a malformed header on every
+    // request — the same mistake the other two shapes already guard against.
+    if (p.apiKey && !hasCallerAuth(p.headers)) base.authorization = `Bearer ${p.apiKey}`;
+    const headers = mergeHeaders(base, p.headers);
 
     const request = { url: `${baseUrl}/chat/completions`, headers, body, signal: p.signal };
     return streaming ? this.stream(request, p.onDelta!) : this.buffered(request);
@@ -78,10 +80,18 @@ export class OpenAIChatProvider implements Provider {
     // An empty `content` inside a real choice is a legitimate answer. A missing
     // `choices` array is not an answer at all — it is a gateway or proxy body
     // wearing a 200, and returning "" for it invents a completion.
-    if (!Array.isArray(json.choices)) throw malformedResponse("no choices array", json, requestId);
+    if (!Array.isArray(json.choices) || json.choices.length === 0) {
+      throw malformedResponse("no choices returned", json, requestId);
+    }
     const choice = json.choices[0];
+    const content = choice?.message?.content;
+    // `null`/absent is a legitimate empty answer. A number or an object is not
+    // text, and coercing it would put a fabricated string in the result.
+    if (content !== undefined && content !== null && typeof content !== "string") {
+      throw malformedResponse(`choice content is ${typeof content}, not a string`, json, requestId);
+    }
     return {
-      text: choice?.message?.content ?? "",
+      text: content ?? "",
       ...usageOf(json.usage),
       finishReason: choice?.finish_reason ?? undefined,
       providerRequestId: requestId ?? json.id,
@@ -96,7 +106,7 @@ export class OpenAIChatProvider implements Provider {
     let finishReason: string | undefined;
     let usage: OpenAIUsage | undefined;
 
-    const { requestId, frames } = await openSse(request);
+    const { requestId, state, frames } = await openSse(request);
     let id: string | undefined = requestId;
 
     for await (const raw of frames) {
@@ -112,6 +122,16 @@ export class OpenAIChatProvider implements Provider {
         onDelta(delta);
       }
       if (choice.finish_reason) finishReason = choice.finish_reason;
+    }
+
+    // Either an explicit `[DONE]` or a finish reason counts as the provider
+    // saying it is done. Neither means the socket simply closed.
+    if (!state.sawDone && !finishReason) {
+      throw malformedResponse(
+        "stream ended without a terminal event — the connection closed mid-answer",
+        { text },
+        requestId,
+      );
     }
 
     return { text, ...usageOf(usage), finishReason, providerRequestId: id };

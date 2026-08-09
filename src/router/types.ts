@@ -101,7 +101,15 @@ export type ResponseFormat =
 export interface ReasoningOptions {
   /** Coarse effort level. Expressible by `openai-chat`. */
   effort?: "minimal" | "low" | "medium" | "high";
-  /** Explicit thinking-token budget. Expressible by `anthropic` and `google-genai`. */
+  /**
+   * Explicit thinking-token budget. Expressible by `anthropic` and `google-genai`.
+   *
+   * Maps to Anthropic's `thinking.budget_tokens` and Google's
+   * `generationConfig.thinkingConfig.thinkingBudget` — the latter being the
+   * Gemini 2.5-lineage control. Newer Google models may expose a different knob
+   * (a coarse level rather than a budget); when they do, this shape will need a
+   * matching field rather than a silent reinterpretation of this one.
+   */
   budgetTokens?: number;
 }
 
