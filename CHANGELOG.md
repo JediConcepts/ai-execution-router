@@ -223,6 +223,28 @@ same probe now reports the corrected behaviour.
 - Stale `Capability` and `tokenSource: "provider"` references removed from the
   docs; every skill example now shows the required `endpoint.provider`.
 
+### Fixed (fifth pass, after the first live call)
+
+The first real request ever made through this router found a bug that 83 mocked
+tests did not.
+
+- **`ModelUnavailableError` never fired for real model ids.** The pattern bounded
+  the gap between "model" and the verdict with `[^.]`, and every model id in
+  production has dots in it — `gemini-2.5-flash`, `claude-4.6`, `gpt-5.4`. A live
+  404 reading *"This model models/gemini-2.5-flash is no longer available"*
+  classified as a plain `PermanentError`, so a controller could not tell "swap the
+  model" from "the request was malformed". The synthetic test passed only because
+  `definitely-not-a-real-model-xyz` has no dots in it.
+- **Error messages were raw JSON envelopes.** A thrown error whose `.message` is
+  400 characters of `{"error":{...}}` is unreadable in logs, in test output, and in
+  a controller's skip log. The provider's own sentence is now the message; the full
+  envelope stays on `.body` and the status string on `.providerCode`.
+- **The smoke harness asks the endpoint which models it serves** when the
+  configured one is unavailable, instead of failing four checks with the same
+  message. `gemini-2.5-flash` was retired for new keys between the harness being
+  written and first being run — a hardcoded default is the same catalogue rot the
+  router refuses to ship, so the harness now does what it tells callers to do.
+
 ### Added
 
 - `google-genai` wire shape (Gemini Developer API and Vertex AI). `router.ts` gained

@@ -48,6 +48,7 @@ function targets() {
   if (anthropicKey) {
     out.push({
       name: "anthropic",
+      envVar: "SMOKE_ANTHROPIC_MODEL",
       model: env("SMOKE_ANTHROPIC_MODEL") ?? "claude-haiku-4-5",
       endpoint: { provider: "anthropic", apiKey: anthropicKey },
       // The Messages API has no response_format field; the router must say so.
@@ -59,7 +60,8 @@ function targets() {
   if (geminiKey) {
     out.push({
       name: "gemini-developer",
-      model: env("SMOKE_GEMINI_MODEL") ?? "gemini-2.5-flash",
+      envVar: "SMOKE_GEMINI_MODEL",
+      model: env("SMOKE_GEMINI_MODEL") ?? "gemini-flash-latest",
       endpoint: { provider: "google-genai", apiKey: geminiKey },
       supportsJson: true,
     });
@@ -71,7 +73,8 @@ function targets() {
   if (vertexToken && vertexProject) {
     out.push({
       name: "vertex",
-      model: env("SMOKE_VERTEX_MODEL") ?? "gemini-2.5-flash",
+      envVar: "SMOKE_VERTEX_MODEL",
+      model: env("SMOKE_VERTEX_MODEL") ?? "gemini-flash-latest",
       endpoint: {
         provider: "google-genai",
         baseUrl:
@@ -89,6 +92,7 @@ function targets() {
   if (nvidiaKey) {
     out.push({
       name: "nvidia (openai-chat)",
+      envVar: "SMOKE_NVIDIA_MODEL",
       model: env("SMOKE_NVIDIA_MODEL") ?? "meta/llama-3.3-70b-instruct",
       endpoint: {
         provider: "openai-chat",
@@ -103,6 +107,7 @@ function targets() {
   if (bridgeUrl) {
     out.push({
       name: "local-cli-bridge",
+      envVar: "SMOKE_BRIDGE_MODEL",
       model: env("SMOKE_BRIDGE_MODEL") ?? "sonnet",
       endpoint: {
         provider: "openai-chat",
@@ -117,6 +122,36 @@ function targets() {
   }
 
   return out;
+}
+
+/**
+ * Ask the endpoint which models it will actually serve.
+ *
+ * A hardcoded default rots — `gemini-2.5-flash` was retired for new keys between
+ * this harness being written and first being run. Rather than guess again, when a
+ * model turns out to be unavailable we ask, which is the same answer the project
+ * gives to "should the router ship a catalogue?": no, the endpoint knows.
+ *
+ * Best-effort and never fatal: a listing failure just means no suggestion.
+ */
+async function suggestModels(t) {
+  if (t.endpoint.provider !== "google-genai") return null;
+  const base = (t.endpoint.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
+  const headers = { ...(t.endpoint.headers ?? {}) };
+  if (!Object.keys(headers).some((k) => k.toLowerCase() === "authorization")) {
+    headers["x-goog-api-key"] = t.endpoint.apiKey ?? "";
+  }
+  try {
+    const res = await fetch(`${base}/models?pageSize=200`, { headers });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return (json.models ?? [])
+      .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent"))
+      .map((m) => String(m.name ?? "").replace(/^models\//, ""))
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
 }
 
 // ── Harness ───────────────────────────────────────────────────────────────────
@@ -154,12 +189,34 @@ async function runTarget(t) {
   const base = { model: t.model, endpoint: t.endpoint, maxTokens: MAX_TOKENS, timeoutMs };
 
   let buffered;
+  let modelUnavailable = false;
 
   await check("buffered call returns text", async () => {
-    buffered = await complete({ ...base, task: "smoke", input: PROMPT });
+    try {
+      buffered = await complete({ ...base, task: "smoke", input: PROMPT });
+    } catch (err) {
+      if (err instanceof ModelUnavailableError) modelUnavailable = true;
+      throw err;
+    }
     if (!buffered.text?.trim()) throw new Error("empty text on a successful call");
     return JSON.stringify(buffered.text.trim().slice(0, 40));
   });
+
+  // No point running four more checks against a model that does not exist — they
+  // would all fail for the same reason and bury it.
+  if (modelUnavailable) {
+    const available = await suggestModels(t);
+    console.log(`\n${indent}  \x1b[33mThe configured model is not available to this key.\x1b[0m`);
+    if (available?.length) {
+      console.log(`${indent}  The endpoint currently serves ${available.length} model(s), including:`);
+      for (const name of available.slice(0, 8)) console.log(`${indent}    ${name}`);
+      console.log(`${indent}  Re-run with e.g.  \x1b[1m${t.envVar}=${available[0]} npm run smoke -- ${t.name}\x1b[0m`);
+    } else {
+      console.log(`${indent}  Set \x1b[1m${t.envVar}\x1b[0m to a model your key can reach.`);
+    }
+    console.log(`${indent}  \x1b[2mSkipping this target's remaining checks.\x1b[0m`);
+    return;
+  }
 
   if (buffered) {
     // "unreported" is the designed, honest answer when an endpoint says nothing —

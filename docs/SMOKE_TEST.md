@@ -15,9 +15,10 @@ and each target makes at most five calls.
 **Run it:**
 
 ```sh
-npm run smoke                # every target you have credentials for
-npm run smoke vertex         # just one
-npm run smoke gemini bridge  # a few
+npm run build                    # the harness exercises dist/, not the sources
+npm run smoke                    # every target you have credentials for
+npm run smoke -- vertex          # just one
+npm run smoke -- gemini bridge   # a few
 ```
 
 Targets without credentials are **skipped, not failed** — set up whichever you need.
@@ -30,10 +31,25 @@ The easy one. Get a key from [aistudio.google.com/apikey](https://aistudio.googl
 
 ```sh
 export GEMINI_API_KEY='AIza…'
-npm run smoke gemini-developer
+npm run build && npm run smoke -- gemini-developer
 ```
 
-That's it. The free tier is enough.
+The free tier is enough.
+
+**If the model is unavailable**, the harness asks the endpoint which models your key
+can actually reach and prints them, rather than leaving you to guess:
+
+```
+  The configured model is not available to this key.
+  The endpoint currently serves 24 model(s), including:
+    gemini-flash-latest
+    …
+  Re-run with e.g.  SMOKE_GEMINI_MODEL=gemini-flash-latest npm run smoke -- gemini-developer
+```
+
+This happens: `gemini-2.5-flash` was retired for new keys between this harness being
+written and first being run. The defaults here are a starting guess, not a catalogue —
+which is the same reason the router itself ships no model list.
 
 **What it proves:** the `google-genai` wire shape end to end — `contents[]`/`parts[]`,
 the `model` role, `systemInstruction`, `usageMetadata` mapping, `responseMimeType`
@@ -68,7 +84,7 @@ export VERTEX_PROJECT="$(gcloud config get-value project)"
 export VERTEX_REGION='us-central1'
 export VERTEX_ACCESS_TOKEN="$(gcloud auth print-access-token)"
 
-npm run smoke vertex
+npm run smoke -- vertex
 ```
 
 Note there is **no `VERTEX_API_KEY`** and the smoke config sets no `apiKey` at all.
@@ -120,7 +136,7 @@ export BRIDGE_URL='http://127.0.0.1:8787/v1'
 export SMOKE_BRIDGE_MODEL='sonnet'      # or your Codex slug
 # export BRIDGE_API_KEY='…'             # only if you started the bridge with one
 
-npm run smoke local-cli-bridge
+npm run smoke -- local-cli-bridge
 ```
 
 This target is **slow** — every request spawns a CLI process, so allow a minute or two.
@@ -171,7 +187,7 @@ Key from [build.nvidia.com](https://build.nvidia.com).
 
 ```sh
 export NVIDIA_API_KEY='nvapi-…'
-npm run smoke nvidia
+npm run smoke -- nvidia
 ```
 
 ---
@@ -180,7 +196,7 @@ npm run smoke nvidia
 
 ```sh
 export ANTHROPIC_API_KEY='sk-ant-…'
-npm run smoke anthropic
+npm run smoke -- anthropic
 ```
 
 Also checks that `responseFormat: { type: "json" }` is **refused** with

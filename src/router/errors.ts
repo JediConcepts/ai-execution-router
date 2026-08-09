@@ -180,10 +180,19 @@ export function isContextOverflow(body: string, providerCode?: string): boolean 
   );
 }
 
-/** An unknown, retired, or unentitled model id. Exported for testing. */
+/**
+ * An unknown, retired, or unentitled model id. Exported for testing.
+ *
+ * The gap between "model" and the verdict is bounded by newline rather than by
+ * `[^.]`, which is what an earlier version used and which quietly failed on every
+ * model whose name contains a dot — `gemini-2.5-flash`, `claude-4.6`, `gpt-5.4`.
+ * The bound existed to stop a match running across sentences; excluding dots
+ * excluded the identifiers this predicate is entirely about. Found by the first
+ * live call ever made through this router.
+ */
 export function isModelUnavailable(body: string, providerCode?: string): boolean {
-  if (providerCode && /model_not_found|model_unavailable/i.test(providerCode)) return true;
-  return /model[^.]{0,40}(not found|does not exist|no longer available|is unavailable|not supported)|unknown model|invalid model/i.test(
+  if (providerCode && /model_not_found|model_unavailable|NOT_FOUND/i.test(providerCode)) return true;
+  return /model[^\n]{0,80}?(not found|does not exist|no longer available|is unavailable|not supported|is not allowed|has been (deprecated|retired))|unknown model|invalid model|model_not_found/i.test(
     body,
   );
 }

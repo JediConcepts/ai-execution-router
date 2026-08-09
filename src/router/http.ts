@@ -147,17 +147,29 @@ async function readErrorResponse(
     const aborted = classifyAbort(err, signal);
     if (aborted) throw aborted;
   }
+  // Prefer the provider's own message over the raw envelope. A thrown error
+  // whose `.message` is 400 characters of JSON is unreadable everywhere it
+  // surfaces — logs, test output, a controller's skip log — and the full body is
+  // still carried on `.body` for anyone who wants it.
   let providerCode: string | undefined;
+  let message = text || response.statusText;
   try {
-    const parsed = JSON.parse(text) as { error?: { code?: string; type?: string; message?: string } };
-    providerCode = parsed.error?.code ?? parsed.error?.type;
+    const parsed = JSON.parse(text) as {
+      error?: { code?: string | number; status?: string; type?: string; message?: string };
+    };
+    const err = parsed.error;
+    if (err) {
+      const code = err.status ?? err.type ?? err.code;
+      providerCode = code === undefined ? undefined : String(code);
+      if (typeof err.message === "string" && err.message.trim()) message = err.message.trim();
+    }
   } catch {
     // Not JSON — the raw text is all the detail there is.
   }
   throw classifyHttpError(
     response.status,
     response.headers.get("retry-after") ?? undefined,
-    text || response.statusText,
+    message,
     undefined,
     { status: response.status, body: text, providerCode, requestId },
   );
