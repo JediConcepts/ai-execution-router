@@ -51,6 +51,25 @@ This happens: `gemini-2.5-flash` was retired for new keys between this harness b
 written and first being run. The defaults here are a starting guess, not a catalogue —
 which is the same reason the router itself ships no model list.
 
+### Interop note found by this run: thinking tokens spend your output budget
+
+Gemini counts `thoughtsTokenCount` **inside** `maxOutputTokens`. A reasoning model
+given a small ceiling can consume the whole budget thinking and return **no answer at
+all** — `finishReason: MAX_TOKENS`, empty text, zero deltas, and a JSON response
+truncated mid-string. One cause, three symptoms, none of them a router fault.
+
+The router reports this honestly and it is worth knowing what that looks like:
+
+- `finishReason` is `MAX_TOKENS`, not `STOP`
+- `reasoningTokens` is populated from `thoughtsTokenCount`
+- `tokenSource` may read `partial`, because Gemini omits `candidatesTokenCount`
+  entirely when no answer tokens were produced — an honest "we were told half of it"
+  rather than a fabricated zero
+
+If you are budgeting `maxTokens` for a Gemini model, budget for the thinking too, or
+pass `reasoning: { budgetTokens: … }` to bound it explicitly. The harness now uses a
+512-token ceiling for exactly this reason and prints thinking tokens when present.
+
 **What it proves:** the `google-genai` wire shape end to end — `contents[]`/`parts[]`,
 the `model` role, `systemInstruction`, `usageMetadata` mapping, `responseMimeType`
 constraint, and SSE frames over `?alt=sse`.

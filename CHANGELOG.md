@@ -245,6 +245,29 @@ tests did not.
   written and first being run — a hardcoded default is the same catalogue rot the
   router refuses to ship, so the harness now does what it tells callers to do.
 
+### Smoke harness (second live run)
+
+No router changes — the harness was at fault, and the run is recorded because the
+finding is worth keeping.
+
+- **A 32-token output ceiling is unusable against a reasoning model.** Gemini bills
+  `thoughtsTokenCount` inside `maxOutputTokens`, so the budget was spent thinking
+  and the call returned `finishReason: MAX_TOKENS` with no answer text — which
+  presented as three separate failures (empty text, zero stream deltas, JSON
+  truncated mid-string) with one cause. Ceiling raised to 512.
+- **Thinking and cached tokens are now printed.** Their absence from the output is
+  what made the above hard to read; `reasoningTokens` named the cause immediately
+  once shown.
+- **"empty text on a successful call" now explains itself**, naming the finish
+  reason and, for an output-ceiling stop, saying that reasoning models bill
+  thinking against `maxTokens`.
+- **New check: an explicit `reasoning.budgetTokens` is accepted and reported**, on
+  the shapes that encode one.
+
+The router's behaviour throughout was correct: it surfaced `MAX_TOKENS`, populated
+`reasoningTokens`, and honestly downgraded `tokenSource` to `partial` when Gemini
+omitted `candidatesTokenCount` rather than reporting a fabricated zero.
+
 ### Added
 
 - `google-genai` wire shape (Gemini Developer API and Vertex AI). `router.ts` gained

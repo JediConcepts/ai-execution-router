@@ -35,7 +35,18 @@ try {
 }
 
 const PROMPT = { messages: [{ role: "user", content: "Reply with exactly: PONG" }] };
-const MAX_TOKENS = 32;
+
+/**
+ * Deliberately generous for a two-token answer.
+ *
+ * Reasoning models bill thinking against the SAME output ceiling — Gemini counts
+ * `thoughtsTokenCount` inside `maxOutputTokens` — so a tight budget is consumed
+ * before any answer text exists. A 32-token cap produced `finishReason:
+ * MAX_TOKENS` with empty text, no stream deltas, and JSON truncated mid-string:
+ * one cause, three symptoms, none of them the router's fault. Still under a
+ * hundredth of a cent per call.
+ */
+const MAX_TOKENS = 512;
 
 // ── Target definitions ────────────────────────────────────────────────────────
 
@@ -49,6 +60,7 @@ function targets() {
     out.push({
       name: "anthropic",
       envVar: "SMOKE_ANTHROPIC_MODEL",
+      supportsBudget: true,
       model: env("SMOKE_ANTHROPIC_MODEL") ?? "claude-haiku-4-5",
       endpoint: { provider: "anthropic", apiKey: anthropicKey },
       // The Messages API has no response_format field; the router must say so.
@@ -61,6 +73,7 @@ function targets() {
     out.push({
       name: "gemini-developer",
       envVar: "SMOKE_GEMINI_MODEL",
+      supportsBudget: true,
       model: env("SMOKE_GEMINI_MODEL") ?? "gemini-flash-latest",
       endpoint: { provider: "google-genai", apiKey: geminiKey },
       supportsJson: true,
@@ -74,6 +87,7 @@ function targets() {
     out.push({
       name: "vertex",
       envVar: "SMOKE_VERTEX_MODEL",
+      supportsBudget: true,
       model: env("SMOKE_VERTEX_MODEL") ?? "gemini-flash-latest",
       endpoint: {
         provider: "google-genai",
@@ -154,6 +168,24 @@ async function suggestModels(t) {
   }
 }
 
+/**
+ * Why a successful call produced no text.
+ *
+ * "empty text" on its own sends you looking at the router. The finish reason
+ * almost always names the real cause, and for reasoning models it is usually the
+ * output budget being spent on thinking.
+ */
+function emptyTextDiagnosis(r) {
+  const reason = r.finishReason ?? "no finishReason";
+  if (/max.?tokens|length/i.test(reason)) {
+    const thinking = r.reasoningTokens ? `${r.reasoningTokens} thinking tokens; ` : "";
+    return `no text: hit the output ceiling (${reason}). ${thinking}` +
+      "Reasoning models bill thinking against maxTokens — raise it, or set reasoning.budgetTokens lower.";
+  }
+  if (/safety|blocked|recitation/i.test(reason)) return `no text: the response was filtered (${reason}).`;
+  return `no text on a successful call (finishReason: ${reason}).`;
+}
+
 // ── Harness ───────────────────────────────────────────────────────────────────
 
 const results = [];
@@ -198,7 +230,7 @@ async function runTarget(t) {
       if (err instanceof ModelUnavailableError) modelUnavailable = true;
       throw err;
     }
-    if (!buffered.text?.trim()) throw new Error("empty text on a successful call");
+    if (!buffered.text?.trim()) throw new Error(emptyTextDiagnosis(buffered));
     return JSON.stringify(buffered.text.trim().slice(0, 40));
   });
 
@@ -224,10 +256,10 @@ async function runTarget(t) {
     if (buffered.tokenSource === "unreported") {
       warn("usage reporting", "unreported — honest, but this endpoint cannot be costed");
     } else {
-      pass(
-        "usage is reported, not invented",
-        `${buffered.promptTokens} in / ${buffered.completionTokens} out (${buffered.tokenSource})`,
-      );
+      const parts = [`${buffered.promptTokens} in`, `${buffered.completionTokens} out`];
+      if (buffered.reasoningTokens) parts.push(`${buffered.reasoningTokens} thinking`);
+      if (buffered.cachedPromptTokens) parts.push(`${buffered.cachedPromptTokens} cached`);
+      pass("usage is reported, not invented", `${parts.join(" / ")} (${buffered.tokenSource})`);
     }
 
     if (buffered.providerRequestId) {
@@ -243,7 +275,7 @@ async function runTarget(t) {
   const streamCheck = async () => {
     const chunks = [];
     const r = await complete({ ...base, input: PROMPT, onDelta: (d) => chunks.push(d) });
-    if (chunks.length === 0) throw new Error("no deltas received");
+    if (chunks.length === 0) throw new Error(`no deltas received — ${emptyTextDiagnosis(r)}`);
     const joined = chunks.join("");
     if (joined !== r.text) {
       throw new Error(`deltas !== final text (${JSON.stringify(joined)} vs ${JSON.stringify(r.text)})`);
@@ -274,6 +306,20 @@ async function runTarget(t) {
       });
       JSON.parse(r.text); // throws if the constraint was ignored
       return r.text.trim().slice(0, 40);
+    });
+  }
+
+  if (t.supportsBudget) {
+    await check("an explicit thinking budget is accepted and reported", async () => {
+      const r = await complete({
+        ...base,
+        input: PROMPT,
+        reasoning: { budgetTokens: 128 },
+      });
+      if (!r.text?.trim()) throw new Error(emptyTextDiagnosis(r));
+      return r.reasoningTokens !== undefined
+        ? `${r.reasoningTokens} thinking tokens reported`
+        : "accepted (endpoint reported no thinking count)";
     });
   }
 
