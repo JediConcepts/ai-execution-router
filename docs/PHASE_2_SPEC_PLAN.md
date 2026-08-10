@@ -11,6 +11,7 @@
 > | Streaming, timeouts, cancellation are unaddressed | **Shipped** — `onDelta`, `timeoutMs`, `signal` |
 > | Two wire shapes | **Three** — `google-genai` added |
 > | Callbacks unspecified | `onUsage` (success only, awaited, propagates) and `onAttempt` (every attempt, awaited, swallowed) |
+> | "All hook failures are swallowed" (§9) | **Split, deliberately.** `onAttempt` is swallowed and bounded at 5s; `onUsage` propagates, because it runs on the success path where a silent billing-write failure is the worse outcome. See the doc comment on `CompleteParams.onUsage` and issue #4 |
 >
 > `ARCHITECTURE.md` is the governing document and wins wherever the two disagree.
 > This file is kept for the reasoning it records, not as a specification.
@@ -273,6 +274,8 @@ The generator yields chunks and returns the same `CompleteResult` that `complete
 
 - All hooks are caller-supplied. The router never opens a span, writes a log line, or sends to a network sink.
 - All hook failures are swallowed: a buggy `onUsage` cannot break a successful call.
+  **Superseded** — see the table at the top of this file. `onAttempt` is swallowed;
+  `onUsage` is not, and a throwing one does fail the call.
 - No hook receives information beyond what is already reportable (model, tokens, latency, status, typed error). No prompt content leaks via hooks unless the caller already has it.
 
 **Open questions**:
