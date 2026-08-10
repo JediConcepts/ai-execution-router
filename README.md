@@ -9,6 +9,17 @@ A deterministic execution engine for LLM calls. One function: `complete()`. It t
 
 Built for systems where model execution must remain predictable, auditable, and separate from policy, routing, fallback, cost, and governance decisions.
 
+| Wire format | Verified against | |
+|---|---|---|
+| `anthropic` | Anthropic Messages API | ✅ 8/8 |
+| `google-genai` | Gemini Developer API | ✅ 8/8 |
+| `google-genai` | **Vertex AI** — OAuth bearer, no API key | ✅ 8/8 |
+| `openai-chat` | NVIDIA NIM | ✅ 7/7 |
+| `openai-chat` | local CLI bridge | ✅ 6/6 |
+
+Dated records, per-endpoint gaps and reproduction steps in
+[`docs/VERIFIED.md`](./docs/VERIFIED.md) and [`docs/SMOKE_TEST.md`](./docs/SMOKE_TEST.md).
+
 ## Why this exists
 
 Most AI applications are welded to one provider. That is a single point of failure dressed up as convenience. Models change, pricing changes, terms change, access gets rationed, and the customer rarely controls the switch.
@@ -30,10 +41,17 @@ Governance Controller     policy, routing, failover, audit, cost
       ▼
 AI Execution Router       this repo: deterministic execution only
       │
- ┌────┼────┬────┐
- ▼    ▼    ▼    ▼
- OpenAI  Anthropic  NVIDIA  Local / Private
+ ┌─────────────┬─────────────┬───────────────────┐
+ ▼             ▼             ▼                   ▼
+ Anthropic     Google        OpenAI-compatible   Local / private
+ Messages API  Gemini API ·  OpenAI · Azure ·    Ollama · LM Studio
+               Vertex AI     NVIDIA · Groq ·     vLLM · CLI bridges
+                             OpenRouter · …
 ```
+
+Three wire formats, five endpoints verified against live APIs — including **Vertex AI
+with a controller-minted OAuth bearer and no API key at all**. See
+[`docs/VERIFIED.md`](./docs/VERIFIED.md) for the dated records.
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the governing rules.
 

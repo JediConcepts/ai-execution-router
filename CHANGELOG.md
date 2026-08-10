@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.1 — 2026-08-10
+
+Metadata and documentation only. No code changes; `dist/` is byte-identical to 1.0.0.
+
+- **npm now names Google.** The keywords listed `anthropic` and `openai` and no Google
+  at all, so a search for `gemini` or `vertex` did not find this package — despite
+  `google-genai` being a first-class wire format verified against two live Google
+  endpoints. Added `google`, `gemini`, `vertex-ai`, `google-genai`, `claude`,
+  `openai-compatible`, `nvidia-nim`, `ollama`, `vendor-neutral`.
+- **The description names all three wire formats** rather than none.
+- **The provider diagram shows Google**, alongside the suppliers each format reaches.
+  It still showed the pre-Gemini set.
+- **The live verification table moved above the fold.** Five endpoints, including
+  Vertex AI with a controller-minted OAuth bearer and no API key — the most
+  interesting property this package has, previously reachable only by opening
+  `docs/VERIFIED.md`.
+
+Registry metadata only refreshes on publish, which is why this is a release rather
+than a docs commit.
+
 ## 1.0.0 — 2026-08-10
 
 This release is **breaking**, and goes to 1.0.0 rather than 0.2.0 for a reason worth
