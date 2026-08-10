@@ -152,12 +152,58 @@ configuration rather than code:
 
 | | |
 |---|---|
-| **Status** | ⬜ Not yet run |
+| **Status** | ✅ All checks passed |
+| **Date** | 2026-08-10 |
+| **Commit** | `e6e488f` |
 | **Wire shape** | `anthropic` |
+| **Endpoint** | `https://api.anthropic.com` (default) |
+| **Model** | `claude-haiku-4-5` |
+| **Auth** | API key via `x-api-key` |
 
-Should also confirm that `responseFormat: { type: "json" }` is **refused** with
-`UnsupportedCapabilityError` — the Messages API has no `response_format` field, and
-a silent drop is the failure mode the fail-closed rule exists to prevent.
+```
+── anthropic  claude-haiku-4-5
+  ✓ buffered call returns text                            "PONG"
+  ✓ usage is reported, not invented                       14 in / 6 out (reported)
+  ✓ request id captured                                   req_011Cdu5n8JdqmE8HokehDPpz
+  ✓ finish reason                                         end_turn
+  ✓ streaming deltas reconstruct the final text           1 deltas, reported usage
+  ✓ an explicit thinking budget is accepted and reported  accepted
+  ✓ an unsupportable parameter is refused before the request
+        Wire shape "anthropic" cannot express "responseFormat.type=json"
+  ✓ a bogus model id yields a typed error                 ModelUnavailableError (status 404)
+
+8/8 checks passed
+```
+
+**The fail-closed rule, demonstrated against a live API.** The Messages API has no
+`response_format` field, and the router raises `UnsupportedCapabilityError` **before
+sending anything**. Had it dropped the constraint instead, the caller would have
+received a fluent answer with no JSON guarantee and nothing in the result recording
+that the instruction was lost. That is the failure this release exists to prevent,
+and this is the only live check of it.
+
+**A classifier bug this row found.** Before credit was added, the run returned
+*"Your credit balance is too low to access the Anthropic API"* — as HTTP **400**.
+Quota exhaustion was only being checked on 429 and 402, so on Anthropic a spent
+balance was indistinguishable from a malformed request: precisely the confusion
+`QuotaExhaustedError` exists to prevent. Quota is now tested across all 4xx, because
+the status does not identify the condition and only the body does. Three regression
+tests cover it.
+
+**Known gaps at this date**
+
+- `thinking.budget_tokens` has a documented **minimum of 1024**, and `maxTokens` must
+  exceed it. The router enforces neither — a provider's minimum is its own and
+  changes without notice, so encoding it would be the kernel carrying provider
+  knowledge it cannot keep current. Anthropic's rejection is clear and typed, which
+  is the correct outcome; the smoke harness was the thing asking for something
+  invalid.
+- With thinking enabled, Anthropic reports **no separate thinking-token count** —
+  they are billed inside `output_tokens`. `reasoningTokens` is therefore undefined
+  here, correctly: the router reports what it is told and does not derive the rest.
+  Contrast Gemini, which breaks them out as `thoughtsTokenCount`.
+- No cache tokens appeared on these calls, so `cachedPromptTokens` and
+  `cacheWriteTokens` stay undefined. Also correct.
 
 ---
 
@@ -279,8 +325,19 @@ merely absent.
 
 ## Promotion
 
-`1.0.0-rc.1` sits on the `next` dist-tag. It is promoted to `latest` when the rows
-above are filled in. **Vertex, the row the central claim rests on, is done**, as is
-the local CLI bridge — the topology three of this branch's fixes were written for —
-and NVIDIA NIM. **Anthropic is the only row left.** See the checklist at the end
+**All five rows are green, so `1.0.0` publishes to `latest`.**
+
+Every wire shape has been exercised against a live endpoint: `anthropic` directly,
+`google-genai` against both the Developer API and Vertex, and `openai-chat` against
+both a real cloud server (NVIDIA) and a local CLI bridge. Between them they confirmed
+the OAuth-bearer boundary, the fail-closed refusal, honest token provenance including
+cache reads, error classification, streaming reassembly, and deadline handling on the
+one topology most likely to break it.
+
+They also found five bugs that a fully green mocked suite did not — recorded in the
+rows above and in `CHANGELOG.md`. That ratio is the argument for keeping this file:
+a live matrix is not ceremony, it is where the defects actually were.
+
+Re-run any row with [`SMOKE_TEST.md`](./SMOKE_TEST.md) after a change that could
+affect it. See the checklist at the end
 of `SMOKE_TEST.md`.
