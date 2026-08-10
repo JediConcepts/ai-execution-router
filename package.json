@@ -1,6 +1,6 @@
 {
   "name": "ai-execution-router",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A deterministic execution engine for LLM calls. One function: complete(). Speaks the Anthropic, OpenAI-compatible and Google Gemini/Vertex AI wire formats. The router executes, the controller decides.",
   "type": "module",
   "license": "MIT",
