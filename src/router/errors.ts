@@ -219,17 +219,26 @@ export function classifyHttpError(
     return new AuthError(message, cause, d);
   }
 
-  if (status === 429) {
-    // Exhaustion is permanent for this request; a per-minute limit is not.
+  // Spent credit is not tied to one status, and assuming it was is a mistake this
+  // made until a live call with an empty balance proved otherwise. It arrives as
+  // 429 (rate-limit-shaped), as 402 (payment required), and as 400 — Anthropic
+  // returns "Your credit balance is too low" with a 400, which without this check
+  // is indistinguishable from a malformed request. So the body decides, and the
+  // status only bounds where we bother looking.
+  if (status !== undefined && status >= 400 && status < 500) {
     if (isQuotaExhaustion(haystack, d.providerCode)) {
       return new QuotaExhaustedError(message, cause, d);
     }
-    return new RateLimitError(message, parseRetryAfter(retryAfterHeader), cause, d);
   }
 
   // 402 is the standard "you owe money" status; OpenRouter and others use it.
   if (status === 402) {
     return new QuotaExhaustedError(message, cause, d);
+  }
+
+  if (status === 429) {
+    // Past the exhaustion check above, a 429 is a per-minute limit: worth waiting out.
+    return new RateLimitError(message, parseRetryAfter(retryAfterHeader), cause, d);
   }
 
   if (status === 400 || status === 404 || status === 422) {

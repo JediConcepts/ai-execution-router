@@ -266,7 +266,7 @@ The canonical API is the contract. Breaking changes to the `complete()` signatur
 
 That rule was unenforceable while the package sat at 0.x, which has no major number to bump — the gap that made an earlier draft of this release claim to follow a rule it could not. **The package is therefore moving to 1.0.0**, where the rule works as written and `^1.x` gives callers the protection `^0.x` never did.
 
-`1.0.0-rc.1` publishes to the `next` dist-tag. A bare `npm install ai-execution-router` continues to resolve to the last stable release; the candidate has to be asked for by name. It is promoted to `latest` only once the live smoke run in [`docs/SMOKE_TEST.md`](./docs/SMOKE_TEST.md) has passed against real endpoints — the mocked suite is necessary and has twice proven insufficient.
+`1.0.0` was held behind a live-endpoint gate rather than a green test suite, and shipped once [`docs/VERIFIED.md`](./docs/VERIFIED.md) recorded all five rows passing against real providers. The mocked suite is necessary and proved insufficient three times: two independent reviews and the live runs each found defects behind it. Any future release that changes transport, classification, or token reporting should re-run [`SMOKE_TEST.md`](./docs/SMOKE_TEST.md) before promotion.
 
 Adding new wire shapes, new encodable features, or new optional fields is non-breaking. Narrowing what a shape declares it can encode is breaking.
 

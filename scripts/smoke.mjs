@@ -461,10 +461,18 @@ async function runTarget(t) {
 
   if (t.supportsBudget) {
     await check("an explicit thinking budget is accepted and reported", async () => {
+      // 1024 is Anthropic's documented floor for `thinking.budget_tokens`, and the
+      // output ceiling has to sit above the budget or the answer has no room left
+      // after thinking. The router does not enforce either — a provider's minimum is
+      // its own, it changes without notice, and encoding it here would be the kernel
+      // carrying provider knowledge it cannot keep current. Anthropic's rejection of
+      // a too-small budget is clear and typed, which is the right outcome.
+      const budgetTokens = 1024;
       const r = await complete({
         ...base,
+        maxTokens: Math.max(MAX_TOKENS, budgetTokens * 2),
         input: PROMPT,
-        reasoning: { budgetTokens: 128 },
+        reasoning: { budgetTokens },
       });
       if (!r.text?.trim()) throw new Error(emptyTextDiagnosis(r));
       return r.reasoningTokens !== undefined
@@ -501,7 +509,12 @@ async function runTarget(t) {
             `classified as ModelUnavailable, but not swallowed either)`;
         }
         // Providers word this inconsistently; a typed error still beats a raw one.
-        return `${err.name} (status ${err.status}) — not classified as ModelUnavailable`;
+        // Print the message when we could not promote it: every time the classifier
+        // has missed, the fix was one word in a pattern, and the only thing standing
+        // between the miss and the fix was seeing what the provider actually said.
+        const said = String(err.message ?? "").replace(/\s+/g, " ").slice(0, 160);
+        return `${err.name} (status ${err.status}) — not classified as ModelUnavailable\n` +
+          `${indent}      provider said: ${said}`;
       }
       throw new Error(`unclassified error: ${err?.name}: ${err?.message}`);
     }

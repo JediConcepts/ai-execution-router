@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0-rc.1 — unreleased, published to the `next` dist-tag
+## 1.0.0 — 2026-08-10
 
 This release is **breaking**, and goes to 1.0.0 rather than 0.2.0 for a reason worth
 stating: the versioning rule in `ARCHITECTURE.md` demands "a major version bump" for
@@ -8,12 +8,32 @@ exactly these changes, and 0.x cannot express one. An earlier draft claimed to f
 that rule while bumping a minor. It didn't. 1.0.0 makes the rule enforceable and gives
 callers a `^1.x` range that actually protects them.
 
-Released as a candidate on `next`, not `latest`: a bare
-`npm install ai-execution-router` still resolves to the last stable release, and this
-has to be asked for with `@next`. Promotion to `latest` waits on the live smoke run
-in [`docs/SMOKE_TEST.md`](./docs/SMOKE_TEST.md). Two independent reviews have now
-found real fail-open bugs behind a fully green mocked suite; a third green suite is
-not the evidence that should unblock a stable release.
+### Verified against live endpoints before release
+
+| Endpoint | Wire shape | Result |
+|---|---|---|
+| Anthropic Messages | `anthropic` | 8/8 |
+| Gemini Developer API | `google-genai` | 8/8, reproduced |
+| Vertex AI | `google-genai` | 8/8, **no `apiKey`** — controller-minted OAuth bearer |
+| NVIDIA NIM | `openai-chat` | 7/7, incl. cached prompt tokens |
+| local-cli-bridge | `openai-chat` | 6/6, plus the post-header `TimeoutError` |
+
+Full records, including known gaps per endpoint, in [`docs/VERIFIED.md`](./docs/VERIFIED.md).
+
+Shipped as `1.0.0` on `latest` because the gate it was held behind has been met:
+**all five rows of [`docs/VERIFIED.md`](./docs/VERIFIED.md) are green against live
+endpoints** — Anthropic, the Gemini Developer API, Vertex AI, NVIDIA NIM, and a local
+CLI bridge. Three wire shapes, five endpoints, dated and recorded with the commit each
+was run against.
+
+The candidate never needed publishing: the remaining checks were finished before it
+would have been useful, so `1.0.0` goes straight out rather than an rc nobody would
+have installed.
+
+That matrix earned its keep. Two independent reviews found sixteen issues behind a
+fully green mocked suite, and the live runs then found five more that no mock could
+have — a dotted-model-name regex that never matched a real model id, spent credit
+arriving as a 400 rather than a 429, and three others recorded in `VERIFIED.md`.
 
 ### Governance note — read this first
 
