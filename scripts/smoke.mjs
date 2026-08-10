@@ -239,7 +239,7 @@ async function probeVertexModels(t) {
       const res = await fetch(`${base}/models/${id}:generateContent`, { method: "POST", headers, body });
       // Anything that is not "no such model" means the id resolved — a 429 or a
       // 400 about the payload still tells us the model exists.
-      if (res.status !== 404) accepted.push(`${id}  (HTTP ${res.status})`);
+      if (res.status !== 404) accepted.push({ id, status: res.status });
     } catch {
       /* network hiccup on a probe is not worth reporting */
     }
@@ -345,8 +345,8 @@ async function runTarget(t) {
       const found = await probeVertexModels(t);
       if (found.length) {
         console.log(`${indent}  Accepted by this project:`);
-        for (const name of found) console.log(`${indent}    ${name}`);
-        console.log(`${indent}  Re-run with  \x1b[1m${t.envVar}=${found[0]} npm run smoke -- ${t.name}\x1b[0m`);
+        for (const m of found) console.log(`${indent}    ${m.id}  \x1b[2m(HTTP ${m.status})\x1b[0m`);
+        console.log(`${indent}  Re-run with  \x1b[1m${t.envVar}=${found[0].id} npm run smoke -- ${t.name}\x1b[0m`);
       } else {
         console.log(`${indent}  None of the probed ids were accepted. Check the Model Garden page`);
         console.log(`${indent}  for your project and region, then set \x1b[1m${t.envVar}\x1b[0m.`);
