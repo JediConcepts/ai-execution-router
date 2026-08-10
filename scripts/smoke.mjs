@@ -409,15 +409,40 @@ async function runTarget(t) {
   };
 
   if (t.streamingRejected) {
-    await check("streaming is refused cleanly (expected for this endpoint)", async () => {
-      try {
-        await streamCheck();
-      } catch (err) {
-        if (err instanceof LLMError) return `${err.name}: ${String(err.message).slice(0, 60)}`;
-        throw new Error(`refused, but with an unclassified error: ${err?.name}`);
+    // "It threw" is not the same as "the endpoint refused". A 4xx is the endpoint
+    // declining loudly, which is what this check exists to verify. Our own
+    // malformed-response guard firing means the endpoint *accepted* the streaming
+    // request and answered with something that was not a stream — a quieter
+    // failure that the router happened to catch, and not a pass.
+    let outcome;
+    try {
+      const detail = await streamCheck();
+      outcome = { kind: "succeeded", detail };
+    } catch (err) {
+      outcome = { kind: "threw", err };
+    }
+
+    if (outcome.kind === "succeeded") {
+      warn(
+        "streaming",
+        `expected this endpoint to reject it, but it streamed: ${outcome.detail}`,
+      );
+    } else {
+      const err = outcome.err;
+      const status = err?.status;
+      if (err instanceof LLMError && typeof status === "number" && status >= 400 && status < 500) {
+        pass("streaming is refused cleanly by the endpoint", `HTTP ${status} — ${err.name}`);
+      } else if (err instanceof LLMError) {
+        warn(
+          "streaming",
+          `the endpoint did not refuse — the router's own guard caught the reply ` +
+            `(${err.name}${status ? ` status ${status}` : ""}). ` +
+            `Ideally the endpoint returns 4xx naming the feature.`,
+        );
+      } else {
+        fail("streaming is refused cleanly", `unclassified error: ${err?.name}: ${err?.message}`);
       }
-      throw new Error("expected this endpoint to reject streaming, but it succeeded");
-    });
+    }
   } else {
     await check("streaming deltas reconstruct the final text", streamCheck);
   }
@@ -467,6 +492,14 @@ async function runTarget(t) {
     } catch (err) {
       if (err instanceof ModelUnavailableError) return `ModelUnavailableError (status ${err.status})`;
       if (err instanceof LLMError) {
+        // An error delivered inside an HTTP 200 is the keep-alive topology: the
+        // endpoint committed to a success status before its backend had failed.
+        // Catching it at all is the point — left alone it reads as a model that
+        // had nothing to say.
+        if (err.status === 200) {
+          return `${err.name} — error arrived inside a 200 body and was caught (not ` +
+            `classified as ModelUnavailable, but not swallowed either)`;
+        }
         // Providers word this inconsistently; a typed error still beats a raw one.
         return `${err.name} (status ${err.status}) — not classified as ModelUnavailable`;
       }
