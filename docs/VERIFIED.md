@@ -84,14 +84,67 @@ candidate that would have answered immediately.
 
 | | |
 |---|---|
-| **Status** | ⬜ Not yet run |
+| **Status** | ✅ All checks passed |
+| **Date** | 2026-08-10 |
+| **Commit** | `1e1a623` (`1.0.0-rc.1`) |
 | **Wire shape** | `google-genai` |
-| **Auth** | Controller-minted OAuth bearer via `endpoint.headers`, **no `apiKey`** |
+| **Endpoint** | `https://us-central1-aiplatform.googleapis.com/v1/projects/…/locations/us-central1/publishers/google` |
+| **Model** | `gemini-2.5-flash` |
+| **Auth** | **Controller-minted OAuth bearer via `endpoint.headers`. No `apiKey` set at all.** |
 
-The load-bearing architectural claim: the router reads no ambient credentials, so a
-Vertex call is only possible if a token minted entirely outside it works through the
-header seam. Until this row is filled in, that claim is designed and tested against
-fixtures, not demonstrated.
+```
+── vertex  gemini-2.5-flash
+  ✓ buffered call returns text                            "PONG"
+  ✓ usage is reported, not invented                       6 in / 2 out / 20 thinking (reported)
+  ✓ request id captured                                   wB55ap_bBoWHlNsPm8rAgQk
+  ✓ finish reason                                         STOP
+  ✓ streaming deltas reconstruct the final text           1 deltas, reported usage
+  ✓ responseFormat json is honoured                       {"ok": true}
+  ✓ an explicit thinking budget is accepted and reported  13 thinking tokens reported
+  ✓ a bogus model id yields a typed error                 ModelUnavailableError (status 404)
+
+8/8 checks passed
+```
+
+**This is the architectural claim, demonstrated rather than asserted.** Vertex wants
+an OAuth bearer; minting one needs ambient credentials; the router reads no ambient
+state by design. The controller mints the token and passes it through
+`endpoint.headers`, and the router — which contains no knowledge of Google, GCP, or
+OAuth — completes the call. The same `google-genai` provider serves both this and the
+Developer API row above, differing only in `baseUrl` and credential.
+
+**Corroborating detail worth keeping.** Google's own `gcloud ai model-garden models
+list`, and a bare `curl` to the publisher-models listing, both **fail** against this
+same project:
+
+```
+"reason": "SERVICE_DISABLED", "consumer": "projects/32555940559"
+```
+
+Those paths carry no project, so Google resolves one from ambient credentials, and
+plain ADC has no quota project attached — so it bills Google's shared default. The
+router is unaffected because the project is in the URL it was given. Ambient
+resolution is the failure mode; explicit parameters are the fix. The library working
+where the vendor's own CLI does not, for exactly the reason it refuses to read the
+environment, is the boundary earning its keep.
+
+**Setup gates passed, in order** — each 4xxs differently, and all three are project
+configuration rather than code:
+
+1. `aiplatform.googleapis.com` enabled — `AuthError` 403 until then
+2. Billing attached to the project — `AuthError` 403 until then (an AI Studio-created
+   project has none, and the Developer API free tier does not need one)
+3. A Vertex model id — `ModelUnavailableError` 404 until then. Developer API aliases
+   like `gemini-flash-latest` are not recognised; `gemini-2.5-flash` is.
+
+**Known gaps at this date**
+
+- The publisher-model listing API returned nothing usable without an explicit
+  `x-goog-user-project` header (now sent by the harness). Discovery here ultimately
+  worked by probing `generateContent` directly.
+- `budgetTokens` maps to `thinkingConfig.thinkingBudget`, as on the Developer API.
+- Vertex's **Anthropic** surface is a different protocol (`:rawPredict`) and remains
+  unreachable by `baseUrl` alone.
 
 ---
 
@@ -135,5 +188,6 @@ Broad coverage of the most common shape against a real cloud server.
 ## Promotion
 
 `1.0.0-rc.1` sits on the `next` dist-tag. It is promoted to `latest` when the rows
-above are filled in — specifically Vertex, without which the central claim is
-unproven. See the checklist at the end of `SMOKE_TEST.md`.
+above are filled in. **Vertex, the row the central claim rests on, is done.**
+Anthropic, the local CLI bridge and NVIDIA NIM remain. See the checklist at the end
+of `SMOKE_TEST.md`.
