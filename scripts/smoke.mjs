@@ -168,6 +168,17 @@ async function suggestModels(t) {
     ? `${vertexHost[1]}/v1beta1/publishers/google/models?pageSize=200`
     : `${base}/models?pageSize=200`;
 
+  // The listing path carries no project, so Google resolves one from ambient
+  // credentials — and plain ADC has no quota project, so it bills Google's shared
+  // default and 403s with SERVICE_DISABLED. Naming the project explicitly fixes it.
+  //
+  // Worth noting what this says about the router: its own calls never hit this,
+  // because the project is in the URL path rather than inferred from whoever
+  // happens to be logged in. Ambient resolution is the failure mode; explicit
+  // parameters are the fix. That is the same argument, one layer down.
+  const projectFromPath = base.match(/\/projects\/([^/]+)/)?.[1];
+  if (vertexHost && projectFromPath) headers["x-goog-user-project"] = projectFromPath;
+
   try {
     const res = await fetch(listUrl, { headers });
     if (!res.ok) return null;

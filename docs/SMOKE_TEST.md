@@ -125,6 +125,29 @@ Note there is **no `VERTEX_API_KEY`** and the smoke config sets no `apiKey` at a
 That is deliberate: the bearer *is* the credential. If this passes, it proves the
 router accepts a call with no API key whatsoever.
 
+### A note on ADC and quota projects
+
+`gcloud auth application-default login` does not necessarily attach a **quota
+project** to your credentials. Anything that resolves the project from ambient
+credentials rather than from the request then bills Google's shared default project
+and fails:
+
+```
+"reason": "SERVICE_DISABLED", "consumer": "projects/32555940559"
+```
+
+This hits `gcloud ai model-garden models list`, the publisher-model listing endpoint,
+and any bare `curl` to a path without `/projects/{id}/` in it. It does **not** hit the
+router, because the router puts the project in the URL and infers nothing from the
+environment. If you want the CLI working too:
+
+```sh
+gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+```
+
+That the library works where the vendor's own CLI does not, for exactly the reason
+the library refuses to read ambient state, is a small vindication of the boundary.
+
 ### If it fails
 
 | Symptom | Cause |
