@@ -461,10 +461,18 @@ async function runTarget(t) {
 
   if (t.supportsBudget) {
     await check("an explicit thinking budget is accepted and reported", async () => {
+      // 1024 is Anthropic's documented floor for `thinking.budget_tokens`, and the
+      // output ceiling has to sit above the budget or the answer has no room left
+      // after thinking. The router does not enforce either — a provider's minimum is
+      // its own, it changes without notice, and encoding it here would be the kernel
+      // carrying provider knowledge it cannot keep current. Anthropic's rejection of
+      // a too-small budget is clear and typed, which is the right outcome.
+      const budgetTokens = 1024;
       const r = await complete({
         ...base,
+        maxTokens: Math.max(MAX_TOKENS, budgetTokens * 2),
         input: PROMPT,
-        reasoning: { budgetTokens: 128 },
+        reasoning: { budgetTokens },
       });
       if (!r.text?.trim()) throw new Error(emptyTextDiagnosis(r));
       return r.reasoningTokens !== undefined

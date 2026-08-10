@@ -5,6 +5,7 @@ import {
   LLMError,
   ModelUnavailableError,
   PermanentError,
+  QuotaExhaustedError,
   RateLimitError,
   TransientError,
   classifyHttpError,
@@ -132,4 +133,35 @@ test("a provider's own message is preferred over the raw JSON envelope", () => {
   assert.ok(!err.message.includes("{"), "message must not be a JSON dump");
   assert.equal(err.providerCode, "NOT_FOUND");
   assert.ok(err.body?.includes("NOT_FOUND"), "full envelope stays on .body");
+});
+
+// ─── Regression: spent credit does not always arrive as 429 ───────────────────
+
+test("Anthropic's 400 'credit balance is too low' is QuotaExhaustedError", () => {
+  // Found by a live call with an empty balance. The pattern already matched the
+  // wording; the bug was only consulting it on 429 and 402, so on Anthropic a spent
+  // balance was indistinguishable from a malformed request.
+  const err = classifyHttpError(
+    400,
+    undefined,
+    "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+    undefined,
+    { status: 400 },
+  );
+  assert.ok(err instanceof QuotaExhaustedError, `got ${err.name}`);
+  assert.ok(err instanceof PermanentError, "must stay permanent — waiting cannot help");
+  assert.ok(!(err instanceof RateLimitError), "must not be retried as a rate limit");
+});
+
+test("a 429 that is only a rate limit is still a RateLimitError", () => {
+  const err = classifyHttpError(429, "5", "Number of requests has exceeded your rate limit", undefined, {
+    status: 429,
+  });
+  assert.ok(err instanceof RateLimitError, `got ${err.name}`);
+  assert.ok(!(err instanceof QuotaExhaustedError));
+});
+
+test("a 400 that is genuinely malformed stays a plain PermanentError", () => {
+  const err = classifyHttpError(400, undefined, "messages: field required", undefined, { status: 400 });
+  assert.equal(err.name, "PermanentError");
 });
