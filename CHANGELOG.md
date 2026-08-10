@@ -268,6 +268,27 @@ The router's behaviour throughout was correct: it surfaced `MAX_TOKENS`, populat
 `reasoningTokens`, and honestly downgraded `tokenSource` to `partial` when Gemini
 omitted `candidatesTokenCount` rather than reporting a fabricated zero.
 
+### Verified live (2026-08-10)
+
+**Gemini Developer API: 8/8.** Buffered and streamed completions, usage with
+`thoughtsTokenCount` mapped to `reasoningTokens`, request id, `finishReason`, JSON
+response format, an explicit thinking budget, and a nonexistent model classified as
+`ModelUnavailableError`. Recorded in [`docs/VERIFIED.md`](./docs/VERIFIED.md).
+
+**The 429 distinction proved itself.** A follow-up run exhausted the free tier and
+produced a real *"You exceeded your current quota, please check your plan and billing
+details"* — classified `QuotaExhaustedError`, not `RateLimitError`, and not retried.
+That pattern was carried over from a production controller that had learned the
+difference the expensive way; this is the first time it has been confirmed end to end
+inside the kernel.
+
+- **New: `docs/VERIFIED.md`** — dated, per-endpoint records with the commit each was
+  run against. Deliberately not a catalogue: it claims only what happened on a given
+  day. Vertex, Anthropic, the bridge and NVIDIA remain unrun.
+- The harness now gives quota exhaustion its own outcome (`?  unverified`) rather
+  than filing it as a failure. Running out of free tier says nothing about the code —
+  but the check did not run, so it cannot count as a pass either.
+
 ### Added
 
 - `google-genai` wire shape (Gemini Developer API and Vertex AI). `router.ts` gained

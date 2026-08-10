@@ -23,6 +23,10 @@ npm run smoke -- gemini bridge   # a few
 
 Targets without credentials are **skipped, not failed** — set up whichever you need.
 
+Results go in [`VERIFIED.md`](./VERIFIED.md): dated, per-endpoint, with the commit
+they were run against. That file is the honest alternative to a provider catalogue —
+it claims only what happened on a given day, not what is true now.
+
 ---
 
 ## 1. Gemini Developer API

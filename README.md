@@ -95,6 +95,9 @@ endpoint: {
 }
 ```
 
+Which of these have actually been run against live endpoints — and on what date, at
+what commit — is recorded in [`docs/VERIFIED.md`](./docs/VERIFIED.md).
+
 ## What the Router Does
 
 - Calls one provider, once, and returns exactly one result — including when streaming.
@@ -109,6 +112,9 @@ endpoint: {
 **A 429 is two different failures.** `RateLimitError` means wait; `QuotaExhaustedError` means your credit is gone and waiting cannot help. It extends `PermanentError`, not `RateLimitError`, so a caller that backs off on rate limits does not sit out a full quota window before failing over.
 
 **`tokenSource` tells you whether to trust the numbers.** A provider that reports no usage yields zeroes marked `"unreported"` rather than an invented figure, so a cost model can decline to price the call instead of pricing a guess.
+
+Which of these have actually been run against live endpoints — and on what date, at
+what commit — is recorded in [`docs/VERIFIED.md`](./docs/VERIFIED.md).
 
 ## What the Router Does NOT Do
 

@@ -21,11 +21,10 @@
  * TypeScript sources that only the repo's own toolchain ever sees.
  */
 
-let complete, LLMError, ModelUnavailableError, UnsupportedCapabilityError;
+let complete, LLMError, ModelUnavailableError, QuotaExhaustedError, UnsupportedCapabilityError;
 try {
-  ({ complete, LLMError, ModelUnavailableError, UnsupportedCapabilityError } = await import(
-    "../dist/index.js"
-  ));
+  ({ complete, LLMError, ModelUnavailableError, QuotaExhaustedError, UnsupportedCapabilityError } =
+    await import("../dist/index.js"));
 } catch (err) {
   console.error(
     "Could not load ../dist/index.js — run `npm run build` first.\n" +
@@ -204,11 +203,23 @@ function warn(what, detail) {
   console.log(`${indent}  \x1b[33m!\x1b[0m ${what}  \x1b[2m${detail}\x1b[0m`);
 }
 
+function unverified(what, detail) {
+  results.push({ ok: true, warned: true, unverified: true });
+  console.log(`${indent}  \x1b[33m?\x1b[0m ${what}  \x1b[2m${detail}\x1b[0m`);
+}
+
 async function check(what, fn) {
   try {
     const detail = await fn();
     pass(what, detail);
   } catch (err) {
+    // Exhausting a free tier says nothing about the code. Filing it as a failure
+    // buries real defects under an account limit, but calling it a pass would
+    // claim a check ran when it did not — so it gets its own outcome.
+    if (err instanceof QuotaExhaustedError) {
+      unverified(what, "quota exhausted — check did not run; retry when the quota resets");
+      return;
+    }
     fail(what, `${err?.name ?? "Error"}: ${String(err?.message ?? err).slice(0, 200)}`);
   }
 }
@@ -383,11 +394,19 @@ for (const t of selected) {
 }
 
 const failures = results.filter((r) => !r.ok);
-const warnings = results.filter((r) => r.warned);
+const warnings = results.filter((r) => r.warned && !r.unverified);
+const unverifiedCount = results.filter((r) => r.unverified).length;
 console.log(
-  `\n\x1b[1m${results.length - failures.length}/${results.length} checks passed\x1b[0m` +
+  `\n\x1b[1m${results.length - failures.length - unverifiedCount}/${results.length} checks passed\x1b[0m` +
+  (unverifiedCount ? `, ${unverifiedCount} unverified (quota)` : "") +
   (warnings.length ? `, ${warnings.length} warning(s)` : ""),
 );
+if (unverifiedCount) {
+  console.log(
+    "\x1b[33mSome checks could not run because the endpoint's quota was exhausted.\x1b[0m\n" +
+    "That is an account limit, not a defect — but those checks remain unproven.",
+  );
+}
 if (failures.length) {
   console.log("\n\x1b[31mFailures:\x1b[0m");
   for (const f of failures) console.log(`  • ${f.what} — ${f.detail}`);
