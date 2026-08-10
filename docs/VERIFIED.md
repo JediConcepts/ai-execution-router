@@ -165,12 +165,67 @@ a silent drop is the failure mode the fail-closed rule exists to prevent.
 
 | | |
 |---|---|
-| **Status** | ⬜ Not yet run |
+| **Status** | ✅ All checks passed |
+| **Date** | 2026-08-10 |
+| **Commit** | `9b00c6a` (`1.0.0-rc.1`) |
 | **Wire shape** | `openai-chat` |
+| **Endpoint** | `http://127.0.0.1:8787/v1` — `local-cli-bridge` 0.2.0, `backend=auto` |
+| **Model** | `sonnet` (Claude Code CLI, subscription login) |
 
-The awkward topology on purpose: a keep-alive shim that commits to HTTP 200 before
-its backend has produced anything. Two results are inverted here — streaming must be
-**refused** with a typed error, and usage warns because the bridge estimates.
+```
+── local-cli-bridge  sonnet
+  ✓ buffered call returns text                     "PONG"
+  ✓ usage is reported, not invented                6 in / 1 out (reported)
+  ✓ request id captured                            chatcmpl-bridge-5upy63r5sk
+  ✓ finish reason                                  stop
+  ✓ streaming is refused cleanly by the endpoint   HTTP 400 — PermanentError
+  ✓ a bogus model id yields a typed error          TransientError (status 502)
+
+6/6 checks passed
+```
+
+This target exists to exercise the topology the reviews found bugs in: a keep-alive
+shim that commits HTTP 200 and flushes headers before its backend has produced
+anything. Three fixes on this branch were written for it, and running against **two
+different bridge versions** happened to exercise all three.
+
+**Against bridge 0.2.0 (above).** Streaming is refused with a real 400 — the endpoint
+declining loudly, which is the pass condition. A nonexistent model produces a clean
+502, classified `TransientError`.
+
+**Against an older vendored bridge (0.1.x-era, same session).** Two behaviours that
+0.2.0 no longer produces, and both were handled:
+
+- A nonexistent model returned **HTTP 200 with the failure inside the body**
+  (`claude failed (exit 1): There's an issue with the selected model…`). Caught and
+  raised. Before this branch it would have been returned as an empty completion — a
+  model that "had nothing to say".
+- Streaming was **silently accepted** rather than refused; the router's non-SSE guard
+  caught a reply that was not a stream. Not a pass, and the harness now reports that
+  case as a warning rather than counting it.
+
+**Deadline classification, tested separately:**
+
+```
+timeoutMs: 3000 against a long-running prompt  →  PASS: TimeoutError
+```
+
+This is the specific regression: the deadline expires *after* headers arrive, during
+the body read. It previously surfaced as a raw `DOMException`. A `TimeoutError` here
+means the fix holds against the one topology most likely to trigger it.
+
+**Known gaps at this date**
+
+- **Usage figures must not be costed.** The bridge estimates at roughly four
+  characters per token because the CLI it wraps reports none. `tokenSource` reads
+  `reported`, which means *the endpoint sent these* — not that anyone measured them.
+- `npx local-cli-bridge` installs **0.1.1** from npm, which does not refuse streaming;
+  the refusal is only on `main` (0.2.0). Use a clone until 0.2.0 is published.
+- The bridge's env loader resolves `.env.bridge.local` from the script's own location,
+  so an npx-installed bridge cannot find a project-local env file. `BRIDGE_ENV_FILE`
+  is the workaround.
+- Each call spawns a CLI process — seconds of latency per request, and real
+  subscription usage. Dev and testing only.
 
 ---
 
@@ -188,6 +243,7 @@ Broad coverage of the most common shape against a real cloud server.
 ## Promotion
 
 `1.0.0-rc.1` sits on the `next` dist-tag. It is promoted to `latest` when the rows
-above are filled in. **Vertex, the row the central claim rests on, is done.**
-Anthropic, the local CLI bridge and NVIDIA NIM remain. See the checklist at the end
+above are filled in. **Vertex, the row the central claim rests on, is done**, as is
+the local CLI bridge — the topology three of this branch's fixes were written for.
+Anthropic and NVIDIA NIM remain. See the checklist at the end
 of `SMOKE_TEST.md`.
