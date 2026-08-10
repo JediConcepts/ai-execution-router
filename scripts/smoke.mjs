@@ -160,8 +160,16 @@ async function suggestModels(t) {
   if (!Object.keys(headers).some((k) => k.toLowerCase() === "authorization")) {
     headers["x-goog-api-key"] = t.endpoint.apiKey ?? "";
   }
+  // Vertex does not list publisher models under projects/locations — that path
+  // holds *your* uploaded models (which is also why `gcloud ai models list`
+  // returns nothing here). Publisher models live at the host root under v1beta1.
+  const vertexHost = base.match(/^(https:\/\/[^/]*-aiplatform\.googleapis\.com)/);
+  const listUrl = vertexHost
+    ? `${vertexHost[1]}/v1beta1/publishers/google/models?pageSize=200`
+    : `${base}/models?pageSize=200`;
+
   try {
-    const res = await fetch(`${base}/models?pageSize=200`, { headers });
+    const res = await fetch(listUrl, { headers });
     if (!res.ok) return null;
     const json = await res.json();
     const entries = json.models ?? json.publisherModels ?? [];
@@ -286,7 +294,8 @@ async function runTarget(t) {
     } else {
       console.log(`${indent}  Set \x1b[1m${t.envVar}\x1b[0m to a model this endpoint serves.`);
       if (t.name === "vertex") {
-        console.log(`${indent}  To list them:  \x1b[1mgcloud ai models list --region=$VERTEX_REGION\x1b[0m`);
+        console.log(`${indent}  To list them:  \x1b[1mgcloud ai model-garden models list\x1b[0m`);
+        console.log(`${indent}  \x1b[2m(\`gcloud ai models list\` shows only models YOU uploaded, not Google's.)\x1b[0m`);
         console.log(`${indent}  \x1b[2mVertex uses its own model ids — Developer API aliases like`);
         console.log(`${indent}  "gemini-flash-latest" are not recognised there.\x1b[0m`);
       }
