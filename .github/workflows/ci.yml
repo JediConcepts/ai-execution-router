@@ -123,7 +123,19 @@ jobs:
 
       # The smoke harness must at least load and report cleanly with no
       # credentials configured; a syntax or import error here is a broken tool.
+      #
+      # Asserting on exit code 78 specifically, not just "non-zero": the harness
+      # exits 1 for a missing dist/, and node itself exits 1 on a syntax error,
+      # so `test $? -eq 1` passed for the broken cases as loudly as for the
+      # healthy one and could never detect what this step exists to detect.
       - name: Smoke harness loads
         run: |
           cd /tmp/consumer/node_modules/ai-execution-router
-          node scripts/smoke.mjs && exit 1 || test $? -eq 1
+          set +e
+          node scripts/smoke.mjs
+          code=$?
+          set -e
+          if [ "$code" -ne 78 ]; then
+            echo "::error::smoke.mjs exited $code, expected 78 (loaded, no targets configured)"
+            exit 1
+          fi

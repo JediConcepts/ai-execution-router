@@ -17,7 +17,7 @@ import type {
   ResponseFormat,
 } from "../types.ts";
 import { PermanentError } from "../errors.ts";
-import { hasCallerAuth, malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
+import { malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 /**
  * No `multimodal-document`: document/file parts are not part of the chat
@@ -27,6 +27,7 @@ import { hasCallerAuth, malformedResponse, mergeHeaders, openSse, postJson, toke
  */
 const ENCODES: ReadonlySet<WireFeature> = new Set<WireFeature>([
   "multimodal-image",
+  "response-format-text",
   "response-format-json",
   "response-format-schema",
   "reasoning-effort",
@@ -67,8 +68,10 @@ export class OpenAIChatProvider implements Provider {
     const base: Record<string, string> = { "content-type": "application/json" };
     // Azure authenticates with `api-key` and no bearer at all. Sending
     // `Authorization: Bearer ` alongside it is a malformed header on every
-    // request — the same mistake the other two shapes already guard against.
-    if (p.apiKey && !hasCallerAuth(p.headers)) base.authorization = `Bearer ${p.apiKey}`;
+    // request. `mergeHeaders` lowercases both sides, so a caller who supplies
+    // their own `Authorization` already replaces this one — the only question
+    // left here is whether there is a key to send at all.
+    if (p.apiKey) base.authorization = `Bearer ${p.apiKey}`;
     const headers = mergeHeaders(base, p.headers);
 
     const request = { url: `${baseUrl}/chat/completions`, headers, body, signal: p.signal };
@@ -94,7 +97,9 @@ export class OpenAIChatProvider implements Provider {
       text: content ?? "",
       ...usageOf(json.usage),
       finishReason: choice?.finish_reason ?? undefined,
-      providerRequestId: requestId ?? json.id,
+      // Payload id first: `chatcmpl-…` is the id that appears on the invoice and
+      // in the provider's own logs. See the note in anthropic.ts.
+      providerRequestId: json.id ?? requestId,
     };
   }
 
@@ -107,7 +112,7 @@ export class OpenAIChatProvider implements Provider {
     let usage: OpenAIUsage | undefined;
 
     const { requestId, state, frames } = await openSse(request);
-    let id: string | undefined = requestId;
+    let id: string | undefined;
 
     for await (const raw of frames) {
       const chunk = raw as OpenAIStreamChunk;
@@ -127,14 +132,16 @@ export class OpenAIChatProvider implements Provider {
     // Either an explicit `[DONE]` or a finish reason counts as the provider
     // saying it is done. Neither means the socket simply closed.
     if (!state.sawDone && !finishReason) {
+      // The length, never the text: `malformedResponse` puts this on `.body`,
+      // which controllers are documented to log.
       throw malformedResponse(
         "stream ended without a terminal event — the connection closed mid-answer",
-        { text },
+        { textLength: text.length },
         requestId,
       );
     }
 
-    return { text, ...usageOf(usage), finishReason, providerRequestId: id };
+    return { text, ...usageOf(usage), finishReason, providerRequestId: id ?? requestId };
   }
 }
 

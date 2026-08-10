@@ -38,6 +38,7 @@ const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const ENCODES: ReadonlySet<WireFeature> = new Set<WireFeature>([
   "multimodal-image",
   "multimodal-document",
+  "response-format-text",
   "response-format-json",
   "response-format-schema",
   "reasoning-budget",
@@ -145,9 +146,11 @@ export class GoogleGenAIProvider implements Provider {
     if (!sawCandidate && blocked) throwIfPromptBlocked(blocked);
     // Google sends no `[DONE]`; the last candidate's finishReason is the marker.
     if (!finishReason) {
+      // The length, never the text: `malformedResponse` puts this on `.body`,
+      // which controllers are documented to log.
       throw malformedResponse(
         "stream ended without a finishReason — the connection closed mid-answer",
-        { text },
+        { textLength: text.length },
         requestId,
       );
     }
@@ -178,10 +181,14 @@ function buildHeaders(
   extra: Record<string, string> | undefined,
 ): Record<string, string> {
   const base: Record<string, string> = { "content-type": "application/json" };
-  // Vertex authenticates with a bearer token instead of an API key. When the
-  // caller supplies one, sending a stray `x-goog-api-key` alongside it is at
-  // best noise and at worst a rejected request.
-  if (!hasCallerAuth(extra)) base["x-goog-api-key"] = apiKey;
+  // Two independent reasons to leave `x-goog-api-key` off, and both are needed.
+  // `hasCallerAuth` covers Vertex, which authenticates with a bearer: a
+  // different header name, so `mergeHeaders` cannot displace ours and the shape
+  // has to stand down itself. The `apiKey` test covers every other scheme the
+  // router now accepts, where `apiKey` is legitimately empty and there is no
+  // `authorization` header to detect — without it those callers got
+  // `x-goog-api-key: ""` sent alongside their real credential.
+  if (apiKey && !hasCallerAuth(extra)) base["x-goog-api-key"] = apiKey;
   return mergeHeaders(base, extra);
 }
 

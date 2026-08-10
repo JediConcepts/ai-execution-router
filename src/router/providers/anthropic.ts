@@ -22,10 +22,34 @@ import type {
   ProviderCallParams,
   ProviderCallResult,
 } from "../types.ts";
+import { PermanentError } from "../errors.ts";
 import { hasCallerAuth, malformedResponse, mergeHeaders, openSse, postJson, tokenSourceOf } from "../http.ts";
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const ANTHROPIC_VERSION = "2023-06-01";
+const DEFAULT_MAX_TOKENS = 1024;
+
+/**
+ * Reject a thinking budget that cannot fit inside the output allowance.
+ *
+ * Distinguishes the two cases, because the fix differs: if the caller set
+ * `maxTokens` themselves, they need a bigger one; if they did not, the router's
+ * own default is what is in the way and saying so saves a confusing round trip.
+ */
+function assertBudgetFitsMaxTokens(
+  budgetTokens: number,
+  maxTokens: number,
+  callerSuppliedMaxTokens: number | undefined,
+): void {
+  if (budgetTokens < maxTokens) return;
+  throw new PermanentError(
+    callerSuppliedMaxTokens === undefined
+      ? `reasoning.budgetTokens (${budgetTokens}) must be below maxTokens, which defaults to ` +
+        `${DEFAULT_MAX_TOKENS} on this wire shape. Set maxTokens above the thinking budget.`
+      : `reasoning.budgetTokens (${budgetTokens}) must be below maxTokens (${maxTokens}) — ` +
+        "the thinking budget is taken out of the output allowance, not added to it.",
+  );
+}
 
 /**
  * No `response-format-*`: the Messages API has no `response_format` field.
@@ -52,12 +76,20 @@ export class AnthropicProvider implements Provider {
     const body: Record<string, unknown> = {
       model: p.model,
       // Required by the API and with no server-side default worth relying on.
-      max_tokens: p.maxTokens ?? 1024,
+      max_tokens: p.maxTokens ?? DEFAULT_MAX_TOKENS,
       messages: p.input.messages.map(toAnthropicMessage),
     };
     if (p.input.system !== undefined) body.system = p.input.system;
     if (p.temperature !== undefined) body.temperature = p.temperature;
     if (p.reasoning?.budgetTokens !== undefined) {
+      // The API requires max_tokens > thinking.budget_tokens: the budget is
+      // carved out of the output allowance, not added to it. Left unchecked, a
+      // caller who set a budget and no maxTokens got the 1024 default against a
+      // larger budget and a guaranteed 400 whose message blamed the API for a
+      // number the router invented. Refusing here says whose fault it is, and
+      // picking an output budget on the caller's behalf is a cost decision this
+      // layer does not make.
+      assertBudgetFitsMaxTokens(p.reasoning.budgetTokens, body.max_tokens as number, p.maxTokens);
       body.thinking = { type: "enabled", budget_tokens: p.reasoning.budgetTokens };
     }
     if (streaming) body.stream = true;
@@ -66,10 +98,15 @@ export class AnthropicProvider implements Provider {
       "content-type": "application/json",
       "anthropic-version": ANTHROPIC_VERSION,
     };
-    // When the caller brought their own bearer — a gateway, a relay — `apiKey`
-    // is legitimately absent, and sending `x-api-key: ""` alongside it is at
-    // best noise and at worst a 401 on a correctly credentialled request.
-    if (!hasCallerAuth(p.headers)) base["x-api-key"] = p.apiKey;
+    // Two independent reasons to leave `x-api-key` off, and both are needed.
+    // `hasCallerAuth` covers a caller who brought a bearer: a different header
+    // name, so `mergeHeaders` cannot displace ours and the shape has to stand
+    // down itself. The `p.apiKey` test covers every other scheme the router now
+    // accepts — Azure's `api-key`, a Cloudflare Access service token — where
+    // `apiKey` is legitimately empty and there is no `authorization` header to
+    // detect. Without it, those callers got `x-api-key: ""` sent alongside their
+    // real credential, which is a 401 on an otherwise correct request.
+    if (p.apiKey && !hasCallerAuth(p.headers)) base["x-api-key"] = p.apiKey;
     const headers = mergeHeaders(base, p.headers);
 
     const request = { url: `${baseUrl}/v1/messages`, headers, body, signal: p.signal };
@@ -92,7 +129,12 @@ export class AnthropicProvider implements Provider {
       text,
       ...usageOf(json.usage),
       finishReason: json.stop_reason ?? undefined,
-      providerRequestId: requestId ?? json.id,
+      // The payload id wins over the header. `msg_…` is what appears on the
+      // invoice and in the provider's logs; a header id is whatever the last hop
+      // chose to stamp on the way out, which is only useful when there is no
+      // payload id at all. google-genai has always read it this way — the three
+      // shapes now agree on what this field means.
+      providerRequestId: json.id ?? requestId,
     };
   }
 
@@ -109,13 +151,13 @@ export class AnthropicProvider implements Provider {
     // Anthropic terminates with `message_stop`, never with `[DONE]`.
     let sawStop = false;
     const { requestId, frames } = await openSse(request);
-    let messageId: string | undefined = requestId;
+    let messageId: string | undefined;
 
     for await (const raw of frames) {
       const event = raw as AnthropicStreamEvent;
       switch (event.type) {
         case "message_start":
-          // The header id wins where present, matching the buffered path.
+          // The payload id wins where present, matching the buffered path.
           messageId ??= event.message?.id;
           if (event.message?.usage) usage = { ...usage, ...event.message.usage };
           break;
@@ -139,9 +181,12 @@ export class AnthropicProvider implements Provider {
     }
 
     if (!sawStop && !stopReason) {
+      // The length, never the text. `malformedResponse` puts its second argument
+      // on `.body`, which controllers are told to log — so passing the partial
+      // completion here wrote model output into every error sink.
       throw malformedResponse(
         "stream ended without a terminal event — the connection closed mid-answer",
-        { text },
+        { textLength: text.length },
         requestId,
       );
     }
@@ -150,7 +195,7 @@ export class AnthropicProvider implements Provider {
       text,
       ...usageOf(usage),
       finishReason: stopReason,
-      providerRequestId: messageId,
+      providerRequestId: messageId ?? requestId,
     };
   }
 }

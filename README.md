@@ -119,7 +119,10 @@ what commit — is recorded in [`docs/VERIFIED.md`](./docs/VERIFIED.md).
 ## What the Router Does
 
 - Calls one provider, once, and returns exactly one result — including when streaming.
-- Retries exactly once if (and only if) the provider returned `429` with an explicit `retry-after`.
+- Retries at most once, and only when the provider returned `429` with an explicit `retry-after`
+  short enough to be worth waiting out (60s). A longer one, or a 429 that turns out to be spent
+  quota, is handed back with `retryAfterMs` intact — whether to wait that long is a failover
+  decision, and failover is the controller's.
 - Refuses, by name, any parameter the chosen wire shape cannot express, rather than dropping it silently.
 - Throws typed errors carrying the provider's own `status`, `providerCode`, and `requestId`.
 - Reports token counts with their provenance, and **never estimates one**.
@@ -130,9 +133,6 @@ what commit — is recorded in [`docs/VERIFIED.md`](./docs/VERIFIED.md).
 **A 429 is two different failures.** `RateLimitError` means wait; `QuotaExhaustedError` means your credit is gone and waiting cannot help. It extends `PermanentError`, not `RateLimitError`, so a caller that backs off on rate limits does not sit out a full quota window before failing over.
 
 **`tokenSource` tells you whether to trust the numbers.** A provider that reports no usage yields zeroes marked `"unreported"` rather than an invented figure, so a cost model can decline to price the call instead of pricing a guess.
-
-Which of these have actually been run against live endpoints — and on what date, at
-what commit — is recorded in [`docs/VERIFIED.md`](./docs/VERIFIED.md).
 
 ## What the Router Does NOT Do
 

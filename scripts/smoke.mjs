@@ -33,6 +33,9 @@ try {
   process.exit(1);
 }
 
+/** Exit code for "loaded fine, but nothing is configured to run against". */
+const NO_TARGETS_EXIT_CODE = 78;
+
 const PROMPT = { messages: [{ role: "user", content: "Reply with exactly: PONG" }] };
 
 /**
@@ -361,15 +364,16 @@ async function runTarget(t) {
       } else {
         console.log(`${indent}  None of the probed ids were accepted. Check the Model Garden page`);
         console.log(`${indent}  for your project and region, then set \x1b[1m${t.envVar}\x1b[0m.`);
-      }
-    } else {
-      console.log(`${indent}  Set \x1b[1m${t.envVar}\x1b[0m to a model this endpoint serves.`);
-      if (t.name === "vertex") {
         console.log(`${indent}  To list them:  \x1b[1mgcloud ai model-garden models list\x1b[0m`);
         console.log(`${indent}  \x1b[2m(\`gcloud ai models list\` shows only models YOU uploaded, not Google's.)\x1b[0m`);
         console.log(`${indent}  \x1b[2mVertex uses its own model ids — Developer API aliases like`);
         console.log(`${indent}  "gemini-flash-latest" are not recognised there.\x1b[0m`);
       }
+    } else {
+      // Reached only when the target is not vertex: the branch above already
+      // captured every vertex target, so a `t.name === "vertex"` test here would
+      // be dead code. The Vertex-specific guidance lives there instead.
+      console.log(`${indent}  Set \x1b[1m${t.envVar}\x1b[0m to a model this endpoint serves.`);
     }
     console.log(`${indent}  \x1b[2mSkipping this target's remaining checks.\x1b[0m`);
     return;
@@ -534,7 +538,12 @@ if (all.length === 0) {
     "VERTEX_ACCESS_TOKEN + VERTEX_PROJECT, NVIDIA_API_KEY, or BRIDGE_URL.\n" +
     "See docs/SMOKE_TEST.md.",
   );
-  process.exit(1);
+  // Distinct from 1 so "the harness ran and found nothing to do" can be told
+  // apart from "the harness is broken". CI asserts on this exact code: with a
+  // bare `exit 1` a syntax error, a missing dist/ and a clean no-op were
+  // indistinguishable, so the check that claimed to catch an import error
+  // could never fail.
+  process.exit(NO_TARGETS_EXIT_CODE);
 }
 if (selected.length === 0) {
   console.error(`No configured target matched ${JSON.stringify(only)}. Available: ${all.map((t) => t.name).join(", ")}`);

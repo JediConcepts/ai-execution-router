@@ -66,7 +66,9 @@ perform — Cloudflare Access, Azure `api-key`, a Vertex bearer the controller m
 ### What the router does
 
 - Calls one provider, once.
-- Retries exactly once if (and only if) the provider returned 429 with an explicit `retry-after`.
+- Retries at most once, and only on a 429 carrying an explicit `retry-after` of 60s or less.
+  A longer wait, or a 429 that is actually spent quota, is returned to you with `retryAfterMs`
+  set so you can decide between waiting and failing over.
 - Throws a typed error otherwise, carrying the provider's own status and code.
 - Refuses unsupported parameters by name rather than dropping them silently.
 - Reports token counts with provenance, and never estimates one.

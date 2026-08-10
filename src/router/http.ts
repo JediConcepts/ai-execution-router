@@ -10,6 +10,7 @@
 import {
   CancelledError,
   LLMError,
+  MalformedResponseError,
   TimeoutError,
   classifyBodyError,
   classifyHttpError,
@@ -25,7 +26,16 @@ export interface HttpPostParams {
   requestIdHeaders?: string[];
 }
 
-const DEFAULT_REQUEST_ID_HEADERS = ["request-id", "x-request-id", "x-amzn-requestid", "cf-ray"];
+/**
+ * Headers that carry a *provider's* request id.
+ *
+ * `cf-ray` used to be on this list and should not have been: it is a Cloudflare
+ * edge trace id, not the model provider's id, and OpenRouter, Groq and most
+ * self-hosted endpoints sit behind Cloudflare while reporting their own id only
+ * in the body. Preferring it meant `providerRequestId` — documented as the key
+ * for invoice reconciliation — held a value that appears on no invoice.
+ */
+const DEFAULT_REQUEST_ID_HEADERS = ["request-id", "x-request-id", "x-amzn-requestid"];
 
 /** Marker set by the router on the signal it owns, so aborts can be attributed. */
 export const TIMEOUT_REASON = Symbol.for("ai-execution-router.timeout");
@@ -79,16 +89,32 @@ interface ProviderErrorPayload {
 function readProviderError(err: unknown): ProviderErrorPayload | undefined {
   if (err === null || err === undefined) return undefined;
   if (typeof err === "string") return err.trim() ? { message: err } : undefined;
-  if (typeof err !== "object") return { message: String(err) };
+  // `false` and `0` are how a server that always emits the key spells "no error
+  // here" when it does not use `{}`. Stringifying them threw away an
+  // already-billed completion and sent the controller off to retry a call that
+  // had just succeeded.
+  if (typeof err !== "object") return err ? { message: String(err) } : undefined;
 
   const o = err as { message?: unknown; code?: unknown; type?: unknown; status?: unknown };
   const message = typeof o.message === "string" ? o.message.trim() : "";
   const rawCode = o.code ?? o.type;
   const code = typeof rawCode === "string" && rawCode.trim() ? rawCode : undefined;
-  if (!message && !code) return undefined;
+
+  if (!message && !code) {
+    // Neither field, but the object is not empty: this is still a real failure
+    // wearing an unfamiliar shape. FastAPI and vLLM send `{"detail": …}`, some
+    // gateways `{"reason": …}` or a numeric `{"code": 503}`. Returning undefined
+    // for those swallowed the failure and reported an empty completion — the one
+    // outcome this whole path exists to prevent. Only the empty-object idiom,
+    // which is what "no error here" actually looks like, means no error.
+    if (Object.keys(o as object).length === 0) return undefined;
+    const serialised = safeStringify(err);
+    if (!serialised || serialised === "{}") return undefined;
+    return { message: serialised.slice(0, 300) };
+  }
 
   return {
-    message: message || code || "unknown provider error",
+    message: message || (code as string),
     code,
     status: typeof o.status === "number" ? o.status : undefined,
   };
@@ -296,7 +322,11 @@ async function* readFrames(
         const rawEvent = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary).replace(/^(\r?\n){2}/, "");
         const data = parseSseData(rawEvent);
-        if (data === undefined) continue;
+        // `data:` with nothing after it is a keep-alive heartbeat — proxies and
+        // several gateways emit them to hold the connection open. It is not a
+        // frame, and `JSON.parse("")` throws, so failing closed on it destroyed
+        // otherwise perfect streams.
+        if (data === undefined || data === "") continue;
         if (data === "[DONE]") {
           state.sawDone = true;
           return;
@@ -316,7 +346,12 @@ async function* readFrames(
     }
     // Some servers close without a trailing blank line — flush whatever is left.
     const tail = parseSseData(buffer);
-    if (tail !== undefined && tail !== "[DONE]") {
+    // A `[DONE]` that arrives without its trailing blank line is still the
+    // provider saying it finished. Skipping it here without recording it left
+    // `sawDone` false, so a complete answer was rejected as truncated.
+    if (tail === "[DONE]") {
+      state.sawDone = true;
+    } else if (tail !== undefined && tail !== "") {
       let payload: unknown;
       try {
         payload = JSON.parse(tail);
@@ -424,20 +459,30 @@ export function mergeHeaders(
 /**
  * A response that parsed but carries none of the fields its wire shape requires.
  *
- * Transient rather than permanent: the usual cause is a proxy, load balancer or
- * gateway substituting its own body, which the same request may survive next time.
+ * Named rather than folded into `TransientError`, because the two causes need
+ * different handling and only the caller can tell them apart across attempts:
+ * a proxy substituting its own body clears on a retry, a request whose output
+ * budget was entirely consumed by thinking never will. See `MalformedResponseError`.
  */
+/**
+ * True when the caller supplied their own `authorization` header, in any casing.
+ *
+ * Load-bearing only for shapes whose own credential header has a *different*
+ * name — `x-api-key`, `x-goog-api-key`. `mergeHeaders` cannot override those
+ * with a bearer, so the shape has to stand down explicitly. It is never on its
+ * own sufficient: an empty `apiKey` must be suppressed regardless of which
+ * header the caller used to authenticate.
+ */
+export function hasCallerAuth(extra: Record<string, string> | undefined): boolean {
+  return Object.keys(extra ?? {}).some((k) => k.toLowerCase() === "authorization");
+}
+
 export function malformedResponse(detail: string, json: unknown, requestId?: string): LLMError {
-  return classifyHttpError(502, undefined, `malformed provider response: ${detail}`, json, {
+  return new MalformedResponseError(`malformed provider response: ${detail}`, json, {
     status: 502,
     body: safeStringify(json),
     requestId,
   });
-}
-
-/** True when the caller supplied their own `authorization` header, in any casing. */
-export function hasCallerAuth(extra: Record<string, string> | undefined): boolean {
-  return Object.keys(extra ?? {}).some((k) => k.toLowerCase() === "authorization");
 }
 
 /**

@@ -46,6 +46,17 @@ export type ProviderName = WireShape | "openai-compatible";
 export type WireFeature =
   | "multimodal-image"
   | "multimodal-document"
+  /**
+   * Accepts an explicit `responseFormat.type = "text"`.
+   *
+   * Separate from the JSON features because a shape can express "plain text,
+   * explicitly" without expressing a JSON constraint. Text is every shape's
+   * default, so this looks redundant — but a gate that only covers `json` and
+   * `json_schema` lets `{type:"text"}` through to a shape that then drops it,
+   * and a gate with a hole in it cannot be used as proof that a parameter
+   * reached the wire.
+   */
+  | "response-format-text"
   | "response-format-json"
   | "response-format-schema"
   /** Accepts a coarse effort enum (`reasoning.effort`). */
