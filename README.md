@@ -168,8 +168,8 @@ ARCHITECTURE.md         governing document
 
 ```sh
 npm ci
-npm test                  # node:test suite, mocked fetch, no network
-npx tsc -p tsconfig.json  # typecheck (same gate CI runs)
+npm test           # node:test suite, mocked fetch, no network
+npm run typecheck  # tsc --noEmit (same gate, and the same command, CI runs)
 ```
 
 ## Status

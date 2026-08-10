@@ -45,9 +45,10 @@ jobs:
         run: npm ci
 
       # tsconfig.json sets noEmit: true, so running tsc against it is a
-      # pure typecheck — the same gate documented in the README.
+      # pure typecheck — the same gate documented in the README, invoked by
+      # the same name a contributor runs locally.
       - name: Typecheck
-        run: npx tsc -p tsconfig.json
+        run: npm run typecheck
 
       # Exact script from package.json: "node --test tests/*.test.ts".
       - name: Test
