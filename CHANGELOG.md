@@ -270,6 +270,18 @@ omitted `candidatesTokenCount` rather than reporting a fabricated zero.
 
 ### Verified live (2026-08-10)
 
+**Vertex AI: 8/8, with no `apiKey` set at all.** The controller mints an OAuth bearer,
+passes it through `endpoint.headers`, and a router containing no knowledge of Google,
+GCP or OAuth completes the call. The same `google-genai` provider serves both Google
+surfaces, differing only in `baseUrl` and credential. This is the release's
+architectural claim demonstrated rather than asserted.
+
+Corroborating: `gcloud ai model-garden models list` and a bare `curl` to the
+publisher-models listing both *fail* against the same project, because those paths
+resolve the project from ambient credentials and plain ADC has no quota project
+attached. The router is unaffected — the project is in the URL it was given. Ambient
+resolution is the failure mode; explicit parameters are the fix.
+
 **Gemini Developer API: 8/8.** Buffered and streamed completions, usage with
 `thoughtsTokenCount` mapped to `reasoningTokens`, request id, `finishReason`, JSON
 response format, an explicit thinking budget, and a nonexistent model classified as
