@@ -98,6 +98,10 @@ gcloud config set project YOUR_PROJECT_ID
 gcloud services enable aiplatform.googleapis.com
 ```
 
+Enabling the API is not optional and is easy to skip — a project that works fine with
+the Gemini Developer API key will still 403 on Vertex until this is run. Allow a
+minute for it to propagate.
+
 Your account needs the **Vertex AI User** role (`roles/aiplatform.user`).
 
 ### Each run
@@ -121,7 +125,9 @@ router accepts a call with no API key whatsoever.
 | Symptom | Cause |
 |---|---|
 | `AuthError` (401) | Token expired — re-run `gcloud auth print-access-token` |
-| `AuthError` (403) | Missing `roles/aiplatform.user`, or the API isn't enabled |
+| `AuthError` (403) *"has not been used in project … or it is disabled"* | The Vertex API is not enabled. `gcloud services enable aiplatform.googleapis.com --project=<project>`, then wait ~1 min |
+| `AuthError` (403) *"permission denied"* | Missing `roles/aiplatform.user` on the account |
+| `AuthError` (403) on a project created by AI Studio | Those projects often have no billing account attached; Vertex requires one, unlike the Gemini Developer API free tier |
 | `ModelUnavailableError` (404) | Model not served in that region. Try `us-central1`, or set `SMOKE_VERTEX_MODEL` |
 | `PermanentError` mentioning the URL | Wrong `VERTEX_REGION` — it appears twice in the URL and both must match |
 

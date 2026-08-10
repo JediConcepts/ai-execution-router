@@ -21,9 +21,9 @@
  * TypeScript sources that only the repo's own toolchain ever sees.
  */
 
-let complete, LLMError, ModelUnavailableError, QuotaExhaustedError, UnsupportedCapabilityError;
+let complete, AuthError, LLMError, ModelUnavailableError, QuotaExhaustedError, UnsupportedCapabilityError;
 try {
-  ({ complete, LLMError, ModelUnavailableError, QuotaExhaustedError, UnsupportedCapabilityError } =
+  ({ complete, AuthError, LLMError, ModelUnavailableError, QuotaExhaustedError, UnsupportedCapabilityError } =
     await import("../dist/index.js"));
 } catch (err) {
   console.error(
@@ -233,17 +233,32 @@ async function runTarget(t) {
 
   let buffered;
   let modelUnavailable = false;
+  let authFailure = null;
 
   await check("buffered call returns text", async () => {
     try {
       buffered = await complete({ ...base, task: "smoke", input: PROMPT });
     } catch (err) {
       if (err instanceof ModelUnavailableError) modelUnavailable = true;
+      if (err instanceof AuthError) authFailure = err;
       throw err;
     }
     if (!buffered.text?.trim()) throw new Error(emptyTextDiagnosis(buffered));
     return JSON.stringify(buffered.text.trim().slice(0, 40));
   });
+
+  // Credentials or project configuration: every remaining check fails identically,
+  // and four copies of the same message bury the one line that matters.
+  if (authFailure) {
+    console.log(`\n${indent}  \x1b[33mAuthentication or project configuration is blocking this target.\x1b[0m`);
+    console.log(`${indent}  \x1b[2m${String(authFailure.message).slice(0, 300)}\x1b[0m`);
+    if (/has not been used in project|is disabled|SERVICE_DISABLED/i.test(authFailure.message ?? "")) {
+      console.log(`${indent}  Looks like the API is not enabled. For Vertex:`);
+      console.log(`${indent}    \x1b[1mgcloud services enable aiplatform.googleapis.com --project=<project>\x1b[0m`);
+    }
+    console.log(`${indent}  \x1b[2mSkipping this target's remaining checks. See docs/SMOKE_TEST.md.\x1b[0m`);
+    return;
+  }
 
   // No point running four more checks against a model that does not exist — they
   // would all fail for the same reason and bury it.
