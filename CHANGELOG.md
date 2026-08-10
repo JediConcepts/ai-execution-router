@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased
+
+A fourth review round. Four of these were regressions introduced by the hardening in
+1.0.0 — the fail-closed guards were right in principle and too eager in practice, and
+each one turned a working call into a thrown error.
+
+### Fixed — regressions in 1.0.0
+
+- **A `data: [DONE]` arriving without its trailing blank line was not counted as a
+  terminal event.** It fell into the tail-flush branch, which skipped it without
+  setting `sawDone`, so a complete answer from any server that ends the body that way
+  was rejected as truncated.
+- **An empty `data:` keep-alive frame killed the stream.** `parseSseData` returns `""`
+  for a heartbeat, `JSON.parse("")` throws, and the new fail-closed branch turned that
+  into `MalformedResponseError` mid-answer. Heartbeats are now skipped like comments.
+- **`anthropic` and `google-genai` sent an empty key header** when the caller
+  authenticated with anything other than `authorization`. `resolveEndpoint` was widened
+  in 1.0.0 to accept any header as a credential, but the two providers still gated on
+  `hasCallerAuth`, so a Cloudflare Access or Azure-style caller got `x-api-key: ""`
+  alongside their real credential. Both now also require a non-empty `apiKey`.
+- **`isModelUnavailable` matched parameter rejections.** Widening the gap bound and
+  adding "is not allowed" made `Model <id>: response_format is not supported` — how
+  NVIDIA NIM rejects an unsupported field — classify as a dead model, so a controller
+  retired a healthy endpoint instead of dropping one parameter. The two verdict classes
+  are now separated: "gone" keeps the wide bound, "refused" may not cross a clause.
+
+### Fixed — carried over from earlier rounds
+
+- **A hanging `onAttempt` sink could hold a completed call open forever.** Neither
+  `timeoutMs` nor the caller's `signal` covered that await. Bounded at 5s.
+- **`latencyMs` included the audit sink's own duration**, so the record measured
+  observation cost as provider cost. Now clocked when the provider returns.
+- **`responseFormat: { type: "text" }` bypassed the capability gate** and was dropped
+  silently by `anthropic`. Added `response-format-text` so every branch of the union is
+  gated; the two shapes that implement it declare it.
+- **A thinking budget at or above `max_tokens` is now refused before the request.**
+  With `maxTokens` unset the router's own 1024 default collided with any larger budget
+  and the API answered with a guaranteed 400 blaming a number the router invented.
+- **408, 409 and 425 are `TransientError`; every other 4xx is `PermanentError`.** The
+  unenumerated statuses previously returned a bare `LLMError`, outside both arms of the
+  documented branch, so a retryable 408 was never retried and a 451 never failed over.
+- **In-body errors with neither `message` nor `code` are no longer swallowed.** The
+  FastAPI/vLLM `{"error":{"detail":…}}` shape returned `undefined` and reported an empty
+  completion. Only the genuinely empty `{}` idiom now means "no error".
+- **A falsy `"error"` field no longer discards a good completion.** `{"error": false}`
+  was stringified into a thrown `TransientError`, throwing away an already-billed answer.
+- **`cf-ray` removed from the request-id headers, and the payload id now wins.** A
+  Cloudflare edge trace was displacing `chatcmpl-…`/`msg_…` in `providerRequestId`, the
+  field documented as the key for invoice reconciliation. All three shapes now agree.
+- **Stream-truncation errors carry the length, not the text.** The partial completion
+  was being written to `err.body`, which controllers are told to log.
+
+### Added
+
+- `MalformedResponseError` — a named `TransientError` for a 200 carrying none of the
+  fields its wire shape requires. Retryable when a proxy substituted the body,
+  deterministic when the output allowance was consumed by thinking; one response cannot
+  tell them apart, so the router names it rather than guessing.
+
+### Fixed — tooling and docs
+
+- The CI "smoke harness loads" step asserted `exit 1`, which a syntax error, a missing
+  `dist/` and a clean no-op all satisfied — it could never fail. The harness now exits
+  `78` for "loaded, no targets configured" and CI asserts on that.
+- Unreachable Vertex guidance in `scripts/smoke.mjs` moved to a branch that can run.
+- The retry rule is no longer described as firing "if and only if" a `retry-after` is
+  present: the 60s ceiling and the `QuotaExhaustedError` split made that false in two
+  directions. Corrected in `README.md`, `ARCHITECTURE.md` and `SKILL.md`.
+- Removed a paragraph duplicated into a README section where its "these" had no
+  antecedent.
+
 ## 1.0.1 — 2026-08-10
 
 Metadata and documentation only. No code changes; `dist/` is byte-identical to 1.0.0.

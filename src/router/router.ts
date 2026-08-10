@@ -45,6 +45,14 @@ const PROVIDERS: Record<WireShape, () => Provider> = {
  */
 const MAX_RETRY_AFTER_MS = 60_000;
 
+/**
+ * The longest the router will wait on an `onAttempt` sink before moving on.
+ *
+ * Long enough for a file append or a local queue write, short enough that a
+ * dead log endpoint cannot hold a completed call open.
+ */
+const SINK_TIMEOUT_MS = 5_000;
+
 interface ResolvedEndpoint {
   wireShape: WireShape;
   baseUrl?: string;
@@ -77,9 +85,9 @@ export async function complete(params: CompleteParams): Promise<CompleteResult> 
         onDelta: params.onDelta,
       });
 
-    let result: ProviderCallResult;
+    let attempted: Attempted;
     try {
-      result = await attempt(call, 1, params, provider.wireShape);
+      attempted = await attempt(call, 1, params, provider.wireShape);
     } catch (err) {
       // The single retry the router permits itself: an explicit `retry-after`
       // from the provider. Anything else — including a 429 that turned out to be
@@ -92,10 +100,17 @@ export async function complete(params: CompleteParams): Promise<CompleteResult> 
       // controller decide whether that wait is worth taking.
       if (err.retryAfterMs > MAX_RETRY_AFTER_MS) throw err;
       await sleep(err.retryAfterMs, deadline.signal);
-      result = await attempt(call, 2, params, provider.wireShape);
+      attempted = await attempt(call, 2, params, provider.wireShape);
     }
 
-    const latencyMs = Date.now() - startedAt;
+    const result = attempted.result;
+    // Clocked when the provider call returned, not when this line runs. Reading
+    // the clock here folded the `onAttempt` sink's own duration into the number
+    // — a sink that fsyncs for 40ms made a 300ms call report 340ms, so the audit
+    // trail recorded observation cost as provider cost. Everything the caller
+    // genuinely waited for is still counted, including a failed first attempt
+    // and the `retry-after` sleep between them.
+    const latencyMs = attempted.finishedAt - startedAt;
 
     if (params.onUsage) {
       const record: UsageRecord = {
@@ -134,23 +149,34 @@ export async function complete(params: CompleteParams): Promise<CompleteResult> 
   }
 }
 
+/** A provider call, and when it came back — before any audit sink was involved. */
+interface Attempted {
+  result: ProviderCallResult;
+  /** This attempt's own duration, for its `AttemptRecord`. */
+  latencyMs: number;
+  /** `Date.now()` at the moment the provider returned. */
+  finishedAt: number;
+}
+
 /** Run one attempt, reporting it to `onAttempt` whether it succeeds or fails. */
 async function attempt(
   call: () => Promise<ProviderCallResult>,
   n: number,
   params: CompleteParams,
   wireShape: WireShape,
-): Promise<ProviderCallResult> {
+): Promise<Attempted> {
   const startedAt = Date.now();
   try {
     const result = await call();
+    const finishedAt = Date.now();
+    const latencyMs = finishedAt - startedAt;
     await report(params.onAttempt, {
       task: params.task,
       model: params.model,
       wireShape,
       attempt: n,
       outcome: "success",
-      latencyMs: Date.now() - startedAt,
+      latencyMs,
       timestamp: new Date().toISOString(),
       usage: {
         promptTokens: result.promptTokens,
@@ -162,7 +188,7 @@ async function attempt(
       },
       providerRequestId: result.providerRequestId,
     });
-    return result;
+    return { result, latencyMs, finishedAt };
   } catch (err) {
     await report(params.onAttempt, {
       task: params.task,
@@ -199,10 +225,31 @@ async function report(
 ): Promise<void> {
   if (!sink) return;
   try {
-    await sink(record);
+    await withSinkTimeout(sink(record));
   } catch {
     /* an audit sink must not be able to fail the call it is observing */
   }
+}
+
+/**
+ * Wait for a sink, but never indefinitely.
+ *
+ * `timeoutMs` bounds the provider call; it does not reach this await, and the
+ * caller's `signal` does not either. So a sink POSTing to a log service that has
+ * gone dark — an entirely ordinary sink for this library — turned a 50ms call
+ * into a permanent hang with no documented way out. The record may still land
+ * after this returns; what it may not do is hold the call open waiting for it.
+ */
+function withSinkTimeout(pending: void | Promise<void>): Promise<void> {
+  if (!(pending instanceof Promise)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, SINK_TIMEOUT_MS);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    pending.then(done, done);
+  });
 }
 
 /**
@@ -228,6 +275,13 @@ function assertCapabilities(params: CompleteParams, provider: Provider): void {
     }
   }
 
+  // Every branch of the union is gated, including `text`. It is the default
+  // everywhere, so letting it through looks harmless — but anthropic never reads
+  // `responseFormat` at all, so the parameter vanished silently, and the same
+  // request meant different things on different shapes with nothing to say so.
+  if (params.responseFormat?.type === "text") {
+    need("response-format-text", "responseFormat.type=text");
+  }
   if (params.responseFormat?.type === "json") {
     need("response-format-json", "responseFormat.type=json");
   }

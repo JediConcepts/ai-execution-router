@@ -24,6 +24,7 @@ export {
   CancelledError,
   ContextLengthError,
   LLMError,
+  MalformedResponseError,
   ModelUnavailableError,
   PermanentError,
   QuotaExhaustedError,

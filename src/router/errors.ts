@@ -140,6 +140,24 @@ export class UnsupportedCapabilityError extends PermanentError {
   }
 }
 
+/**
+ * A response that parsed but carries none of the fields its wire shape requires.
+ *
+ * Extends `TransientError` because the common cause — a proxy, load balancer or
+ * gateway substituting its own body — often clears on a retry. But not always:
+ * a Gemini call whose `maxOutputTokens` is entirely consumed by thinking returns
+ * a 200 with usage and no candidates, and that repeats forever. The router
+ * cannot tell the two apart from one response, so it names the condition and
+ * lets the controller decide: retrying this class more than once is rarely
+ * worth it, and a second identical failure means it is deterministic.
+ */
+export class MalformedResponseError extends TransientError {
+  constructor(message: string, cause?: unknown, details: ErrorDetails = {}) {
+    super(message, cause, details);
+    this.name = "MalformedResponseError";
+  }
+}
+
 /** The request exceeded `timeoutMs`. Transient: the same call may succeed on a retry. */
 export class TimeoutError extends TransientError {
   readonly timeoutMs: number;
@@ -181,20 +199,34 @@ export function isContextOverflow(body: string, providerCode?: string): boolean 
 }
 
 /**
- * An unknown, retired, or unentitled model id. Exported for testing.
+ * Verdicts that can only be about the model itself.
  *
- * The gap between "model" and the verdict is bounded by newline rather than by
- * `[^.]`, which is what an earlier version used and which quietly failed on every
- * model whose name contains a dot — `gemini-2.5-flash`, `claude-4.6`, `gpt-5.4`.
- * The bound existed to stop a match running across sentences; excluding dots
- * excluded the identifiers this predicate is entirely about. Found by the first
- * live call ever made through this router.
+ * The gap is bounded by newline rather than by `[^.]`, which is what an earlier
+ * version used and which quietly failed on every model whose name contains a dot
+ * — `gemini-2.5-flash`, `claude-4.6`, `gpt-5.4`. The bound existed to stop a
+ * match running across sentences; excluding dots excluded the identifiers this
+ * predicate is entirely about. Found by the first live call ever made.
  */
+const MODEL_GONE =
+  /model[^\n]{0,80}?(not found|does not exist|no longer available|is unavailable|has been (deprecated|retired))|unknown model|invalid model|model_not_found/i;
+
+/**
+ * Verdicts that describe a model *or* a parameter, and so need a tighter leash.
+ *
+ * "not supported" and "not allowed" are how a provider rejects an unsupported
+ * *parameter*, and those messages name the model first: NVIDIA NIM answers a
+ * bad `response_format` with "Model meta/llama-3.3-70b-instruct: response_format
+ * is not supported". Matched loosely that reads as a dead model, and a
+ * controller retires a healthy endpoint instead of dropping one field. Refusing
+ * to cross a clause boundary (`:`, `;`, `,`) keeps "model gemini-1.0-pro is not
+ * supported" — where the verdict really is about the model — and drops the rest.
+ */
+const MODEL_REFUSED = /model[^\n:;,]{0,40}?(is )?(not supported|not allowed)/i;
+
+/** An unknown, retired, or unentitled model id. Exported for testing. */
 export function isModelUnavailable(body: string, providerCode?: string): boolean {
   if (providerCode && /model_not_found|model_unavailable|NOT_FOUND/i.test(providerCode)) return true;
-  return /model[^\n]{0,80}?(not found|does not exist|no longer available|is unavailable|not supported|is not allowed|has been (deprecated|retired))|unknown model|invalid model|model_not_found/i.test(
-    body,
-  );
+  return MODEL_GONE.test(body) || MODEL_REFUSED.test(body);
 }
 
 /**
@@ -247,12 +279,23 @@ export function classifyHttpError(
     return new PermanentError(message, cause, d);
   }
 
-  if (status !== undefined && status >= 500) {
+  if (status === undefined || status >= 500) {
     return new TransientError(message, cause, d);
   }
 
-  if (status === undefined) {
+  // The retryable 4xx. 408 is the server saying "you took too long, try again";
+  // 409 and 425 are Cloudflare and other fronting layers asking for a re-send.
+  if (status === 408 || status === 409 || status === 425) {
     return new TransientError(message, cause, d);
+  }
+
+  // Every remaining 4xx is the request's own fault and will fail identically on
+  // a retry. Leaving them as a bare LLMError put them outside the taxonomy
+  // entirely: a controller branching on TransientError/PermanentError matched
+  // neither arm, so 405, 423 and 451 fell into an unknown-error path and a
+  // plainly retryable 408 was never retried.
+  if (status >= 400) {
+    return new PermanentError(message, cause, d);
   }
 
   return new LLMError(message, cause, d);

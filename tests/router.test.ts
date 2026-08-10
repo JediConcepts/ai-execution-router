@@ -5,6 +5,8 @@ import {
   AuthError,
   CancelledError,
   ContextLengthError,
+  LLMError,
+  MalformedResponseError,
   ModelUnavailableError,
   PermanentError,
   QuotaExhaustedError,
@@ -180,7 +182,7 @@ test('legacy "openai-compatible" is still accepted as openai-chat', async () => 
 
 // ─── Wire shape translation ───────────────────────────────────────────────────
 
-test("anthropic: system hoisted, usage and cache tokens mapped, request id from header", async () => {
+test("anthropic: system hoisted, usage and cache tokens mapped, payload request id wins", async () => {
   const m = mockFetch([ANTHROPIC_OK]);
   try {
     const r = await complete({
@@ -196,7 +198,10 @@ test("anthropic: system hoisted, usage and cache tokens mapped, request id from 
     assert.equal(r.completionTokens, 3);
     assert.equal(r.cachedPromptTokens, 2);
     assert.equal(r.tokenSource, "reported");
-    assert.equal(r.providerRequestId, "req_abc");
+    // The payload id, not the `request-id` header, because `msg_…` is what the
+    // provider bills and logs against. A header id is whatever the last hop
+    // stamped on the way out, and is only useful when the body carries none.
+    assert.equal(r.providerRequestId, "msg_1");
   } finally {
     m.restore();
   }
@@ -549,7 +554,16 @@ test("supported request features are actually sent", async () => {
     assert.equal(oai.response_format.json_schema.name, "out");
     assert.equal(oai.reasoning_effort, "high");
 
-    await complete({ model: "m", input: HI, endpoint: ANTHROPIC, reasoning: { budgetTokens: 2048 } });
+    // maxTokens must exceed the thinking budget: the budget is carved out of the
+    // output allowance. Without it this request 400s against the live API every
+    // time, which is what the router now refuses up front.
+    await complete({
+      model: "m",
+      input: HI,
+      endpoint: ANTHROPIC,
+      maxTokens: 4096,
+      reasoning: { budgetTokens: 2048 },
+    });
     assert.deepEqual(JSON.parse(m.calls[1].body).thinking, { type: "enabled", budget_tokens: 2048 });
 
     await complete({
@@ -1283,6 +1297,238 @@ test("a rejecting async onAttempt still cannot mask the provider's error", async
         }),
       AuthError,
     );
+  } finally {
+    m.restore();
+  }
+});
+
+// ─── Regressions ──────────────────────────────────────────────────────────────
+//
+// One test per defect found in review. Each of these passed a green suite before
+// the fix, which is the point: they pin behaviour the type system cannot.
+
+test("a caller who authenticates by a non-authorization header gets no empty key header", async () => {
+  const m = mockFetch([ANTHROPIC_OK, GEMINI_OK]);
+  try {
+    await complete({
+      model: "m",
+      input: HI,
+      endpoint: { provider: "anthropic", headers: { "cf-access-client-id": "abc" } },
+    });
+    // Not `x-api-key: ""` alongside the real credential — that is a 401 on an
+    // otherwise correctly credentialled request.
+    assert.equal(m.calls[0].headers.get("x-api-key"), null);
+    assert.equal(m.calls[0].headers.get("cf-access-client-id"), "abc");
+
+    await complete({
+      model: "g",
+      input: HI,
+      endpoint: { provider: "google-genai", headers: { "x-custom-token": "t" } },
+    });
+    assert.equal(m.calls[1].headers.get("x-goog-api-key"), null);
+  } finally {
+    m.restore();
+  }
+});
+
+test("a [DONE] with no trailing blank line still counts as a terminal event", async () => {
+  // No finish_reason anywhere, and the body ends without the blank line that
+  // closes a frame — the shape several OpenAI-compatible servers actually emit.
+  const frames = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n';
+  const m = mockFetch([{ status: 200, body: frames, contentType: SSE }]);
+  try {
+    const r = await complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} });
+    assert.equal(r.text, "ok");
+  } finally {
+    m.restore();
+  }
+});
+
+test("an empty data: heartbeat frame does not destroy the stream", async () => {
+  const frames = [
+    "data: ",
+    'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+    "data: [DONE]",
+  ].join("\n\n") + "\n\n";
+  const m = mockFetch([{ status: 200, body: frames, contentType: SSE }]);
+  try {
+    const r = await complete({ model: "m", input: HI, endpoint: OAI, onDelta: () => {} });
+    assert.equal(r.text, "ok");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a hanging onAttempt sink cannot hold the call open forever", async () => {
+  const m = mockFetch([ANTHROPIC_OK]);
+  try {
+    const r = await complete({
+      model: "m",
+      input: HI,
+      endpoint: ANTHROPIC,
+      timeoutMs: 50,
+      onAttempt: () => new Promise<void>(() => {}),
+    });
+    assert.equal(r.text, "ok");
+  } finally {
+    m.restore();
+  }
+});
+
+test("latencyMs measures the provider call, not the audit sink", async () => {
+  const m = mockFetch([ANTHROPIC_OK]);
+  try {
+    const r = await complete({
+      model: "m",
+      input: HI,
+      endpoint: ANTHROPIC,
+      onAttempt: () => new Promise<void>((resolve) => setTimeout(resolve, 120)),
+    });
+    assert.ok(r.latencyMs < 100, `latency ${r.latencyMs}ms must exclude the 120ms sink`);
+  } finally {
+    m.restore();
+  }
+});
+
+test("a parameter rejection that names a model is not a dead model", async () => {
+  const m = mockFetch([
+    { status: 400, body: { error: { message: "Model meta/llama-3.3-70b: response_format is not supported" } } },
+  ]);
+  try {
+    const err = await complete({ model: "m", input: HI, endpoint: OAI }).catch((e) => e);
+    assert.ok(err instanceof PermanentError);
+    assert.ok(
+      !(err instanceof ModelUnavailableError),
+      "a rejected parameter must not retire a healthy model",
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("a model that really is gone is still ModelUnavailableError", async () => {
+  const m = mockFetch([{ status: 404, body: { error: { message: "model gemini-2.5-flash does not exist" } } }]);
+  try {
+    await assert.rejects(() => complete({ model: "m", input: HI, endpoint: OAI }), ModelUnavailableError);
+  } finally {
+    m.restore();
+  }
+});
+
+test("an in-body error with no message or code is reported, not swallowed", async () => {
+  // The FastAPI/vLLM shape. Returning undefined here reported an empty
+  // completion, which reads as "the model had nothing to say".
+  const m = mockFetch([{ status: 200, body: { error: { detail: "backend worker crashed" } } }]);
+  try {
+    const err = await complete({ model: "m", input: HI, endpoint: OAI }).catch((e) => e);
+    assert.ok(err instanceof LLMError);
+    assert.match(err.message, /backend worker crashed/);
+  } finally {
+    m.restore();
+  }
+});
+
+test('a falsy "error" field does not discard a good completion', async () => {
+  const m = mockFetch([
+    {
+      status: 200,
+      body: {
+        error: false,
+        id: "chatcmpl_2",
+        choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      },
+    },
+  ]);
+  try {
+    const r = await complete({ model: "m", input: HI, endpoint: OAI });
+    assert.equal(r.text, "hello");
+  } finally {
+    m.restore();
+  }
+});
+
+test("the retryable 4xx are transient and the rest are permanent", async () => {
+  for (const status of [408, 409, 425]) {
+    const m = mockFetch([{ status, body: { error: { message: "retry me" } } }]);
+    try {
+      const err = await complete({ model: "m", input: HI, endpoint: OAI }).catch((e) => e);
+      assert.ok(err instanceof TransientError, `${status} must be transient`);
+    } finally {
+      m.restore();
+    }
+  }
+  for (const status of [405, 451]) {
+    const m = mockFetch([{ status, body: { error: { message: "no" } } }]);
+    try {
+      const err = await complete({ model: "m", input: HI, endpoint: OAI }).catch((e) => e);
+      assert.ok(err instanceof PermanentError, `${status} must be permanent`);
+    } finally {
+      m.restore();
+    }
+  }
+});
+
+test("responseFormat.type=text is refused by a shape that cannot express it", async () => {
+  const m = mockFetch([ANTHROPIC_OK]);
+  try {
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: ANTHROPIC, responseFormat: { type: "text" } }),
+      UnsupportedCapabilityError,
+    );
+  } finally {
+    m.restore();
+  }
+});
+
+test("a thinking budget that cannot fit inside max_tokens is refused up front", async () => {
+  const m = mockFetch([ANTHROPIC_OK]);
+  try {
+    // No maxTokens: the router's own 1024 default is what the budget collides
+    // with, and the API would answer this with a 400 every single time.
+    await assert.rejects(
+      () => complete({ model: "m", input: HI, endpoint: ANTHROPIC, reasoning: { budgetTokens: 4096 } }),
+      PermanentError,
+    );
+    assert.equal(m.calls.length, 0, "refused before any request was sent");
+  } finally {
+    m.restore();
+  }
+});
+
+test("a truncated stream reports the length, never the model's text", async () => {
+  const frames = 'data: {"choices":[{"delta":{"content":"secret output"}}]}\n\n';
+  const m = mockFetch([{ status: 200, body: frames, contentType: SSE }]);
+  try {
+    const err = await complete({
+      model: "m",
+      input: HI,
+      endpoint: OAI,
+      onDelta: () => {},
+    }).catch((e) => e);
+    assert.ok(err instanceof MalformedResponseError);
+    assert.ok(!err.body?.includes("secret output"), "completion text must not reach err.body");
+    assert.match(err.body ?? "", /textLength/);
+  } finally {
+    m.restore();
+  }
+});
+
+test("a Cloudflare ray id never displaces the provider's own id", async () => {
+  const m = mockFetch([
+    {
+      status: 200,
+      headers: { "cf-ray": "8f2a1b3c4d5e6f70-LHR" },
+      body: {
+        id: "chatcmpl_REAL",
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      },
+    },
+  ]);
+  try {
+    const r = await complete({ model: "m", input: HI, endpoint: OAI });
+    assert.equal(r.providerRequestId, "chatcmpl_REAL");
   } finally {
     m.restore();
   }

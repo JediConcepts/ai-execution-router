@@ -180,7 +180,7 @@ complete({
 ## Behavioral Guarantees
 
 - The router calls one provider, once, per `complete()` invocation.
-- The router performs at most one additional call: a single retry on 429 when the provider supplies an explicit `retry-after`. No other retries.
+- The router performs at most one additional call: a single retry on 429 when the provider supplies an explicit `retry-after` of 60s or less and the body does not indicate spent quota. A longer `retry-after`, or a 429 that classifies as `QuotaExhaustedError`, is returned to the caller with `retryAfterMs` intact rather than waited out — how long to block is a cost and latency decision, and those belong to the controller. No other retries.
 - The router does not chain providers, fall back, fail over, or substitute models.
 - The router does not read environment variables.
 - The router does not log to stdout or stderr, ever.
@@ -200,15 +200,27 @@ Every error carries `status`, `providerCode`, `body`, and `requestId` where the 
 |---|---|---|
 | `RateLimitError` | 429, transient. Retried once if `retry-after` was supplied | Whether to wait, queue, or route elsewhere |
 | `QuotaExhaustedError` | 429 or 402 where the body indicates spent quota or credit | Fail over now — waiting cannot help |
-| `TransientError` | Network drop, socket reset, 5xx, malformed body | Whether to retry |
+| `TransientError` | Network drop, socket reset, 5xx, 408/409/425 | Whether to retry |
+| `MalformedResponseError` | A 200 carrying none of the fields the wire shape requires. A `TransientError` | Whether to retry — see below |
 | `TimeoutError` | `timeoutMs` elapsed. A `TransientError` | Whether to retry, perhaps with a longer deadline |
 | `ContextLengthError` | Input exceeded the context window. A `PermanentError` | Whether a larger-context candidate can take the same payload |
 | `ModelUnavailableError` | Unknown, retired, or unentitled model. A `PermanentError` | Whether to substitute a model |
 | `UnsupportedCapabilityError` | The wire shape cannot express a requested parameter. A `PermanentError` | Fix the request, or route to a shape that supports it |
 | `AuthError` | 401 or 403 | Surface to ops; do not retry |
 | `CancelledError` | The caller's `signal` aborted | Nothing — the caller asked to stop |
-| `PermanentError` | Malformed request, or an unclassified 4xx | Whether to fall back or fail |
+| `PermanentError` | Malformed request, or any other 4xx | Whether to fall back or fail |
 | `LLMError` | Catch-all base class | Inspect `cause` |
+
+Every 4xx lands in the taxonomy. 408, 409 and 425 are transient — the server asking for a re-send — and
+everything else in the range is permanent. An earlier version returned a bare `LLMError` for the statuses
+it did not enumerate, which put them outside both arms of the documented `TransientError`/`PermanentError`
+branch: a plainly retryable 408 was never retried, and a 451 was never failed over.
+
+`MalformedResponseError` is transient because the usual cause — a proxy or gateway substituting its own
+body — clears on a retry. It is named separately because the other cause does not: a Gemini call whose
+output allowance is entirely consumed by thinking returns a 200 with usage and no candidates, forever.
+One response cannot distinguish them, so the router names the condition and a second identical failure
+is the caller's signal that it is deterministic.
 
 `QuotaExhaustedError` extends `PermanentError`, **not** `RateLimitError`, and that inheritance is load-bearing. Both conditions arrive as HTTP 429 and only the body distinguishes them; a caller that treats them alike will sit out a full quota window before failing over to a candidate that would have answered immediately.
 
