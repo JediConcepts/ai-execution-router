@@ -1,3 +1,22 @@
+> **⚠️ Superseded in part by 1.0.0-rc.1. Do not read this as current design.**
+>
+> This document was written against the 0.1.0 kernel and predates the wire-shape
+> release. Several things it proposes as future work have since shipped, and at
+> least one thing it assumes as present has been deliberately removed:
+>
+> | This document says | Actual state in 1.0.0-rc.1 |
+> |---|---|
+> | The model catalogue is retained and extended | **Removed.** `endpoint.provider` is required. See *Why there is no model catalog* in `ARCHITECTURE.md` |
+> | Capability data is future work | **Protocol encodability shipped**; endpoint/model capability remains Phase 2 and out of scope |
+> | Streaming, timeouts, cancellation are unaddressed | **Shipped** — `onDelta`, `timeoutMs`, `signal` |
+> | Two wire shapes | **Three** — `google-genai` added |
+> | Callbacks unspecified | `onUsage` (success only, awaited, propagates) and `onAttempt` (every attempt, awaited, swallowed) |
+>
+> `ARCHITECTURE.md` is the governing document and wins wherever the two disagree.
+> This file is kept for the reasoning it records, not as a specification.
+
+---
+
 # Phase 2 — Forward-Looking Spec Plan
 
 > Status: planning only. No code in this phase yet. The router as shipped in Phase 1 is the contract. Phase 2 evolutions extend the execution layer **without** introducing policy, controller responsibilities, or domain-specific logic.

@@ -1,100 +1,360 @@
 import type {
+  AttemptRecord,
+  WireFeature,
   CompleteParams,
   CompleteResult,
   Endpoint,
   Provider,
-  ProviderName,
+  ProviderCallResult,
   UsageRecord,
+  WireShape,
 } from "./types.ts";
-import { AuthError, PermanentError, RateLimitError } from "./errors.ts";
-import { lookupCatalog } from "./catalog.ts";
+import {
+  AuthError,
+  CancelledError,
+  PermanentError,
+  RateLimitError,
+  TimeoutError,
+  UnsupportedCapabilityError,
+} from "./errors.ts";
+import { TIMEOUT_REASON } from "./http.ts";
 import { AnthropicProvider } from "./providers/anthropic.ts";
-import { OpenAICompatibleProvider } from "./providers/openai-compatible.ts";
+import { OpenAIChatProvider } from "./providers/openai-chat.ts";
+import { GoogleGenAIProvider } from "./providers/google-genai.ts";
+
+/**
+ * Wire shape → implementation.
+ *
+ * This table is the only place the router distinguishes between providers, and
+ * it distinguishes them by schema, never by vendor. If adding a model supplier
+ * ever requires editing anything below this map, the abstraction has failed.
+ */
+const PROVIDERS: Record<WireShape, () => Provider> = {
+  anthropic: () => new AnthropicProvider(),
+  "openai-chat": () => new OpenAIChatProvider(),
+  "google-genai": () => new GoogleGenAIProvider(),
+};
+
+/**
+ * The longest the router will block on a provider's `retry-after`.
+ *
+ * The router's one retry exists for short protocol-level limits — the "you are
+ * one request ahead of yourself, wait two seconds" case. Anything beyond this is
+ * a capacity or quota problem, and choosing to wait it out is a decision with
+ * cost and latency consequences: the controller's call, not the kernel's.
+ */
+const MAX_RETRY_AFTER_MS = 60_000;
 
 interface ResolvedEndpoint {
-  provider: ProviderName;
+  wireShape: WireShape;
   baseUrl?: string;
   apiKey: string;
+  headers?: Record<string, string>;
 }
 
 export async function complete(params: CompleteParams): Promise<CompleteResult> {
-  const endpoint = resolveEndpoint(params.model, params.endpoint);
-  const provider = buildProvider(endpoint.provider);
+  const endpoint = resolveEndpoint(params.endpoint);
+  const provider = PROVIDERS[endpoint.wireShape]();
 
+  assertCapabilities(params, provider);
+
+  const deadline = withDeadline(params.signal, params.timeoutMs);
   const startedAt = Date.now();
-  let result;
+
   try {
-    result = await provider.call({
-      model: params.model,
-      input: params.input,
-      apiKey: endpoint.apiKey,
-      baseUrl: endpoint.baseUrl,
-      temperature: params.temperature,
-      maxTokens: params.maxTokens,
-    });
-  } catch (err) {
-    if (err instanceof RateLimitError && typeof err.retryAfterMs === "number") {
-      await sleep(err.retryAfterMs);
-      result = await provider.call({
+    const call = () =>
+      provider.call({
         model: params.model,
         input: params.input,
         apiKey: endpoint.apiKey,
         baseUrl: endpoint.baseUrl,
+        headers: endpoint.headers,
         temperature: params.temperature,
         maxTokens: params.maxTokens,
+        responseFormat: params.responseFormat,
+        reasoning: params.reasoning,
+        signal: deadline.signal,
+        onDelta: params.onDelta,
       });
-    } else {
-      throw err;
+
+    let result: ProviderCallResult;
+    try {
+      result = await attempt(call, 1, params, provider.wireShape);
+    } catch (err) {
+      // The single retry the router permits itself: an explicit `retry-after`
+      // from the provider. Anything else — including a 429 that turned out to be
+      // spent quota — is a failover decision, and failover is the controller's.
+      if (!(err instanceof RateLimitError) || typeof err.retryAfterMs !== "number") throw err;
+      // A long retry-after is the provider saying "not for a while", which is a
+      // failover question, not a sleep. Blocking a library call for an hour is
+      // never the caller's intent, and with no `timeoutMs` set nothing would
+      // interrupt it. Hand the error back with `retryAfterMs` intact and let the
+      // controller decide whether that wait is worth taking.
+      if (err.retryAfterMs > MAX_RETRY_AFTER_MS) throw err;
+      await sleep(err.retryAfterMs, deadline.signal);
+      result = await attempt(call, 2, params, provider.wireShape);
     }
-  }
 
-  const latencyMs = Date.now() - startedAt;
+    const latencyMs = Date.now() - startedAt;
 
-  if (params.onUsage) {
-    const record: UsageRecord = {
-      task: params.task,
+    if (params.onUsage) {
+      const record: UsageRecord = {
+        task: params.task,
+        model: params.model,
+        wireShape: provider.wireShape,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        tokenSource: result.tokenSource,
+        cachedPromptTokens: result.cachedPromptTokens,
+        cacheWriteTokens: result.cacheWriteTokens,
+        reasoningTokens: result.reasoningTokens,
+        latencyMs,
+        timestamp: new Date().toISOString(),
+        finishReason: result.finishReason,
+        providerRequestId: result.providerRequestId,
+      };
+      await params.onUsage(record);
+    }
+
+    return {
+      text: result.text,
       model: params.model,
       promptTokens: result.promptTokens,
       completionTokens: result.completionTokens,
+      tokenSource: result.tokenSource,
+      cachedPromptTokens: result.cachedPromptTokens,
+      cacheWriteTokens: result.cacheWriteTokens,
+      reasoningTokens: result.reasoningTokens,
       latencyMs,
-      timestamp: new Date().toISOString(),
+      finishReason: result.finishReason,
+      providerRequestId: result.providerRequestId,
     };
-    await params.onUsage(record);
+  } finally {
+    deadline.dispose();
+  }
+}
+
+/** Run one attempt, reporting it to `onAttempt` whether it succeeds or fails. */
+async function attempt(
+  call: () => Promise<ProviderCallResult>,
+  n: number,
+  params: CompleteParams,
+  wireShape: WireShape,
+): Promise<ProviderCallResult> {
+  const startedAt = Date.now();
+  try {
+    const result = await call();
+    await report(params.onAttempt, {
+      task: params.task,
+      model: params.model,
+      wireShape,
+      attempt: n,
+      outcome: "success",
+      latencyMs: Date.now() - startedAt,
+      timestamp: new Date().toISOString(),
+      usage: {
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        tokenSource: result.tokenSource,
+        cachedPromptTokens: result.cachedPromptTokens,
+        cacheWriteTokens: result.cacheWriteTokens,
+        reasoningTokens: result.reasoningTokens,
+      },
+      providerRequestId: result.providerRequestId,
+    });
+    return result;
+  } catch (err) {
+    await report(params.onAttempt, {
+      task: params.task,
+      model: params.model,
+      wireShape,
+      attempt: n,
+      outcome: "error",
+      latencyMs: Date.now() - startedAt,
+      timestamp: new Date().toISOString(),
+      errorName: (err as Error)?.name,
+      errorMessage: (err as Error)?.message,
+      status: (err as { status?: number })?.status,
+      providerCode: (err as { providerCode?: string })?.providerCode,
+    });
+    throw err;
+  }
+}
+
+/**
+ * Deliver an attempt record: awaited, but never able to change control flow.
+ *
+ * Awaited because fire-and-forget loses records. An async sink writing to a file
+ * or a queue would still be in flight when `complete()` returned, and a process
+ * that exits promptly afterwards drops exactly the attempts most worth keeping —
+ * the failures that made it exit.
+ *
+ * Swallowed because `onAttempt` also fires on the failure path, where a throwing
+ * sink would replace the provider's real error with its own: losing the evidence
+ * while filing the report.
+ */
+async function report(
+  sink: ((record: AttemptRecord) => void | Promise<void>) | undefined,
+  record: AttemptRecord,
+): Promise<void> {
+  if (!sink) return;
+  try {
+    await sink(record);
+  } catch {
+    /* an audit sink must not be able to fail the call it is observing */
+  }
+}
+
+/**
+ * Refuse, by name, anything the chosen wire shape cannot express.
+ *
+ * Dropping an unsupported parameter would still return a fluent completion —
+ * one whose JSON constraint or reasoning budget was silently discarded, with
+ * nothing in the result to say so. For an execution layer whose purpose is
+ * provable behaviour, failing open is the one unacceptable failure mode.
+ */
+function assertCapabilities(params: CompleteParams, provider: Provider): void {
+  const need = (feature: WireFeature, what: string, hint?: string) => {
+    if (!provider.encodes.has(feature)) {
+      throw new UnsupportedCapabilityError(what, provider.wireShape, hint);
+    }
+  };
+
+  for (const message of params.input.messages) {
+    if (typeof message.content === "string") continue;
+    for (const block of message.content) {
+      if (block.type === "image") need("multimodal-image", "image content blocks");
+      if (block.type === "document") need("multimodal-document", "document content blocks");
+    }
   }
 
+  if (params.responseFormat?.type === "json") {
+    need("response-format-json", "responseFormat.type=json");
+  }
+  if (params.responseFormat?.type === "json_schema") {
+    need("response-format-schema", "responseFormat.type=json_schema");
+  }
+
+  if (params.reasoning?.effort !== undefined) {
+    need(
+      "reasoning-effort",
+      "reasoning.effort",
+      "This wire shape takes an explicit reasoning.budgetTokens instead; converting between the two is a cost/quality judgement the router will not make for you.",
+    );
+  }
+  if (params.reasoning?.budgetTokens !== undefined) {
+    need(
+      "reasoning-budget",
+      "reasoning.budgetTokens",
+      "This wire shape takes a coarse reasoning.effort instead; converting between the two is a cost/quality judgement the router will not make for you.",
+    );
+  }
+
+  if (params.onDelta) need("streaming", "onDelta (streaming)");
+}
+
+function resolveEndpoint(supplied: Endpoint): ResolvedEndpoint {
+  const wireShape = normaliseWireShape(supplied?.provider);
+  if (!wireShape) {
+    throw new PermanentError(
+      `endpoint.provider is required. Supply one of: ${Object.keys(PROVIDERS).join(", ")}.`,
+    );
+  }
+  if (wireShape === "openai-chat" && !supplied?.baseUrl) {
+    throw new PermanentError("baseUrl is required for the openai-chat wire shape");
+  }
+  // A credential must be present — but not necessarily as an API key, and not
+  // necessarily as a bearer. Azure authenticates with `api-key`, Cloudflare
+  // Access with a service-token pair, a gateway with whatever it chose. The
+  // router cannot enumerate those schemes without becoming the credential
+  // authority it refuses to be, so any caller-supplied header counts: this check
+  // exists to catch the empty-handed call, not to police auth.
+  const callerSuppliedHeaders = Object.keys(supplied?.headers ?? {}).length > 0;
+  if (!supplied?.apiKey && !callerSuppliedHeaders) {
+    throw new AuthError(
+      "No credential supplied. Set endpoint.apiKey, or pass one via endpoint.headers.",
+    );
+  }
   return {
-    text: result.text,
-    model: params.model,
-    promptTokens: result.promptTokens,
-    completionTokens: result.completionTokens,
-    latencyMs,
-    finishReason: result.finishReason,
+    wireShape,
+    baseUrl: supplied?.baseUrl,
+    apiKey: supplied?.apiKey ?? "",
+    headers: supplied?.headers,
   };
 }
 
-function resolveEndpoint(model: string, supplied: Endpoint | undefined): ResolvedEndpoint {
-  const catalogEntry = lookupCatalog(model);
-  const provider = supplied?.provider ?? catalogEntry?.provider;
-  if (!provider) {
-    throw new PermanentError(
-      `Cannot resolve provider for model "${model}". Supply endpoint.provider or use a model present in the catalog.`,
-    );
-  }
-  const baseUrl = supplied?.baseUrl ?? catalogEntry?.baseUrl;
-  if (provider === "openai-compatible" && !baseUrl) {
-    throw new PermanentError("baseUrl is required for openai-compatible provider");
-  }
-  if (!supplied?.apiKey) {
-    throw new AuthError("apiKey is required; supply it via endpoint.apiKey");
-  }
-  return { provider, baseUrl, apiKey: supplied.apiKey };
+function normaliseWireShape(provider: string | undefined): WireShape | undefined {
+  if (!provider) return undefined;
+  // Pre-1.0 spelling, kept working rather than broken for cosmetics.
+  if (provider === "openai-compatible") return "openai-chat";
+  // `in` walks the prototype chain, so "toString" and "constructor" would pass
+  // and then die deeper with a TypeError. Untyped JS callers deserve the same
+  // clear PermanentError that TypeScript gives at compile time.
+  if (Object.hasOwn(PROVIDERS, provider)) return provider as WireShape;
+  throw new PermanentError(
+    `Unknown endpoint.provider "${provider}". Expected one of: ${Object.keys(PROVIDERS).join(", ")}.`,
+  );
 }
 
-function buildProvider(name: ProviderName): Provider {
-  if (name === "anthropic") return new AnthropicProvider();
-  return new OpenAICompatibleProvider();
+interface Deadline {
+  signal: AbortSignal | undefined;
+  dispose: () => void;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Compose the caller's cancellation with the router's own deadline.
+ *
+ * Whichever fires first wins, and the abort reason records which it was — a
+ * timeout is transient and worth retrying, a cancellation is an instruction.
+ */
+function withDeadline(signal: AbortSignal | undefined, timeoutMs: number | undefined): Deadline {
+  if (!signal && timeoutMs === undefined) return { signal: undefined, dispose: () => {} };
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const onAbort = () => controller.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+
+  if (timeoutMs !== undefined && !controller.signal.aborted) {
+    // Deliberately not unref'd: the timer must be able to fire on its own.
+    // `dispose()` always clears it once the call settles, so it can never
+    // outlive the request it bounds.
+    timer = setTimeout(() => controller.abort({ [TIMEOUT_REASON]: true, timeoutMs }), timeoutMs);
+  }
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+/** Sleep, but abandon the wait the moment the deadline or the caller says stop. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError(signal));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      reject(abortError(signal));
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(signal: AbortSignal | undefined): Error {
+  const reason = signal?.reason as { timeoutMs?: number } | undefined;
+  if (reason && typeof reason === "object" && TIMEOUT_REASON in reason) {
+    return new TimeoutError(reason.timeoutMs ?? 0);
+  }
+  return new CancelledError();
 }

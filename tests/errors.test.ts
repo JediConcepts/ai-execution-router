@@ -2,11 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   AuthError,
-  classifyHttpError,
   LLMError,
+  ModelUnavailableError,
   PermanentError,
   RateLimitError,
   TransientError,
+  classifyHttpError,
+  isModelUnavailable,
 } from "../src/router/errors.ts";
 
 test("all subclasses extend LLMError", () => {
@@ -83,4 +85,51 @@ test("classifyHttpError: 5xx maps to TransientError", () => {
 
 test("classifyHttpError: undefined status maps to TransientError", () => {
   assert.ok(classifyHttpError(undefined, undefined, "network") instanceof TransientError);
+});
+
+// ─── Regression: model names contain dots ─────────────────────────────────────
+
+test("isModelUnavailable matches real provider messages, including dotted model ids", () => {
+  // The first live call ever made through this router hit exactly this message
+  // and was classified PermanentError instead of ModelUnavailableError, because
+  // the pattern bounded the gap with [^.] and every real model id has dots in it.
+  const shouldMatch = [
+    "This model models/gemini-2.5-flash is no longer available to new users.",
+    "The model `does-not-exist-xyz` does not exist",
+    "model claude-4.6-opus is not supported",
+    "Publisher Model `projects/p/locations/eu/publishers/google/models/gemini-3.0-pro` was not found",
+    "The model gpt-5.4 has been deprecated",
+  ];
+  for (const m of shouldMatch) {
+    assert.ok(isModelUnavailable(m), `expected a match: ${m}`);
+  }
+
+  const shouldNotMatch = [
+    "Rate limit exceeded, please slow down",
+    "This model's maximum context length is 8192 tokens",
+    "Invalid API key provided",
+  ];
+  for (const m of shouldNotMatch) {
+    assert.ok(!isModelUnavailable(m), `expected no match: ${m}`);
+  }
+});
+
+test("a dotted-model 404 classifies as ModelUnavailableError end to end", () => {
+  const err = classifyHttpError(404, undefined, "This model models/gemini-2.5-flash is no longer available.", undefined, {
+    status: 404,
+  });
+  assert.ok(err instanceof ModelUnavailableError, `got ${err.name}`);
+});
+
+test("a provider's own message is preferred over the raw JSON envelope", () => {
+  // Not a unit of classifyHttpError, but the property that makes its output
+  // readable: callers see the sentence, not 400 characters of envelope.
+  const err = classifyHttpError(404, undefined, "This model is no longer available.", undefined, {
+    status: 404,
+    body: '{"error":{"code":404,"message":"This model is no longer available.","status":"NOT_FOUND"}}',
+    providerCode: "NOT_FOUND",
+  });
+  assert.ok(!err.message.includes("{"), "message must not be a JSON dump");
+  assert.equal(err.providerCode, "NOT_FOUND");
+  assert.ok(err.body?.includes("NOT_FOUND"), "full envelope stays on .body");
 });

@@ -21,7 +21,7 @@ export async function ask(prompt: string): Promise<string> {
     task: "ask",
     model: "claude-haiku-4-5",
     input: { messages: [{ role: "user", content: prompt }] },
-    endpoint: { apiKey },
+    endpoint: { provider: "anthropic", apiKey },
   });
   return r.text;
 }
@@ -49,7 +49,7 @@ async function run(task: TaskName, prompt: string) {
     task,
     model: TASK_MODELS[task],
     input: { messages: [{ role: "user", content: prompt }] },
-    endpoint: { apiKey: keyFor(TASK_MODELS[task]) },
+    endpoint: { provider: "anthropic", apiKey: keyFor(TASK_MODELS[task]) },
   });
 }
 ```
@@ -88,7 +88,7 @@ export async function callWithFallback(
         task,
         model: a.model,
         input: { messages: [{ role: "user", content: prompt }] },
-        endpoint: { apiKey: a.apiKey },
+        endpoint: a.endpoint,   // { provider, baseUrl?, apiKey } — resolved by the controller
       });
       return r.text;
     } catch (err) {
@@ -129,7 +129,7 @@ await complete({
   task: "ping",
   model: "claude-haiku-4-5",
   input: { messages: [{ role: "user", content: "Reply with: pong" }] },
-  endpoint: { apiKey: process.env.ANTHROPIC_API_KEY! },
+  endpoint: { provider: "anthropic", apiKey: process.env.ANTHROPIC_API_KEY! },
   onUsage: logUsage,
 });
 ```
@@ -152,7 +152,7 @@ async function ask(task: string, prompt: string): Promise<string> {
     task,
     model: pickModel(task),
     input: { messages: [{ role: "user", content: prompt }] },
-    endpoint: { apiKey: keyFor(task) },
+    endpoint: { provider: "anthropic", apiKey: keyFor(task) },
     onUsage: recordUsage,
   });
   await audit(task, r);            // post-call hook in controller
@@ -176,20 +176,20 @@ function pickModel(needs: { vision?: boolean; longContext?: boolean }): string {
 }
 ```
 
-Catalog data about model capabilities lives in the controller. The router only knows where each model can be reached, not what it is good at.
+Model capability data lives entirely in the controller. The router does not know what a model is good at, and — since it ships no catalog — does not know where one lives either. `endpoint` is always supplied by the caller.
 
 ---
 
 ## Pattern: Custom Endpoints (Self-Hosted, Local, Private)
 
-The router resolves endpoints from a built-in catalog only when no `endpoint` is supplied. Pass `endpoint` to override:
+The router ships no model catalog: `endpoint.provider` is always required, and it names a **wire shape** rather than a vendor. Reaching a self-hosted, local, or private model is therefore a `baseUrl`, not a code change:
 
 ```ts
 await complete({
   model: "my-org/my-tuned-model",
   input: { messages: [{ role: "user", content: "hi" }] },
   endpoint: {
-    provider: "openai-compatible",
+    provider: "openai-chat",
     baseUrl: "https://llm.internal.example/v1",
     apiKey: process.env.INTERNAL_LLM_KEY!,
   },
@@ -200,7 +200,7 @@ For local Ollama:
 
 ```ts
 endpoint: {
-  provider: "openai-compatible",
+  provider: "openai-chat",
   baseUrl: "http://localhost:11434/v1",
   apiKey: "ollama", // any non-empty string; Ollama ignores it
 }
@@ -220,7 +220,9 @@ Whether a request *should* go to a local model rather than the cloud is a contro
 | Typed error labels | What to do with each label |
 | Latency, token, finish-reason reporting | Spend caps, budgets, gating |
 | `onUsage` callback emission | Usage persistence (DB, metrics, audit logs) |
-| Catalog: model → endpoint (factual) | Catalog: model → suitability, cost, trust, capability |
+| Refusing parameters a wire shape cannot express | Choosing a wire shape that supports them |
+| Reporting token provenance (`tokenSource`) | Pricing tokens, and deciding whether to trust an estimate |
+| — | Any catalog at all: model → endpoint, suitability, cost, trust, capability |
 
 When in doubt: if it is a decision, it goes in the controller.
 
@@ -233,8 +235,10 @@ Do not:
 - **Add fallback inside the router.** Wrap `complete()` in a controller instead.
 - **Read `process.env` from router code.** The controller resolves `apiKey` and passes it via `endpoint`.
 - **Log to stdout from the router.** Use `onUsage` and let the controller route the record where it belongs.
-- **Store model preferences in the catalog.** The catalog is factual (model → endpoint). Preference is policy.
-- **Add capability flags to the catalog.** Capability awareness is a controller concern.
+- **Reintroduce a model catalog.** It was removed deliberately: a hardcoded model list rots, and which endpoint serves a model is an account-level deployment fact, not a property of the model.
+- **Add capability flags to router code.** A provider declares only what its *wire format* can express. Which model is good at what is a controller concern.
+- **Silently drop an unsupported parameter.** The router raises `UnsupportedCapabilityError` by name. A dropped JSON constraint still returns a fluent answer, and nothing downstream can tell the instruction was lost.
+- **Estimate a token count.** `tokenSource: "unreported"` is the honest answer. Estimating is an assumption, and assumptions belong to whoever is willing to own them.
 - **Add "if regulated, do X" branches to router code.** Regulatory awareness belongs in a controller written for that regulated context.
 
 If a proposed router change feels like a decision, it is policy, and it belongs in the controller layer, not in this skill.

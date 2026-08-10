@@ -4,6 +4,9 @@
  * The caller reads its own API key from the environment and supplies it to
  * the router via endpoint.apiKey. The router never reads environment
  * variables itself.
+ *
+ * `provider` names a wire shape, not a company: "anthropic" is the Messages
+ * API, whether it is served by Anthropic, Bedrock, or Vertex.
  */
 import { complete } from "../src/router/index.ts";
 
@@ -22,11 +25,12 @@ const result = await complete({
       { role: "user", content: "What is the capital of France?" },
     ],
   },
-  endpoint: { apiKey },
+  endpoint: { provider: "anthropic", apiKey },
+  timeoutMs: 30_000,
 });
 
 console.log(result.text);
 console.log(
-  `tokens: ${result.promptTokens} in / ${result.completionTokens} out, ` +
-  `${result.latencyMs}ms`,
+  `tokens: ${result.promptTokens} in / ${result.completionTokens} out ` +
+  `(${result.tokenSource}), ${result.latencyMs}ms`,
 );

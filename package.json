@@ -1,6 +1,6 @@
 {
   "name": "ai-execution-router",
-  "version": "0.1.0",
+  "version": "1.0.0-rc.1",
   "description": "A deterministic execution engine for LLM calls. One function: complete(). The router executes, the controller decides.",
   "type": "module",
   "license": "MIT",
@@ -37,18 +37,26 @@
   "files": [
     "dist",
     "src",
-    "ARCHITECTURE.md"
+    "scripts",
+    "docs",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md"
   ],
   "sideEffects": false,
   "scripts": {
     "test": "node --test tests/*.test.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "prepublishOnly": "tsc -p tsconfig.json && npm test && npm run build",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "^22",
     "typescript": "^5"
   },
-  "author": "Jedi Concepts (https://jediconcepts.com)"
+  "author": "Jedi Concepts (https://jediconcepts.com)",
+  "publishConfig": {
+    "tag": "next"
+  }
 }
