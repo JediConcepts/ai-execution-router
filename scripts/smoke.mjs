@@ -207,6 +207,46 @@ function emptyTextDiagnosis(r) {
   return `no text on a successful call (finishReason: ${reason}).`;
 }
 
+/**
+ * Ask `generateContent` directly which model ids a Vertex project will accept.
+ *
+ * Deliberately a guess list, deliberately confined to this harness. The listing
+ * API is the correct answer and this is the fallback for when it returns nothing;
+ * a 404 from a probe is information, whereas the same list shipped inside the
+ * router would be a confident wrong answer with a shelf life.
+ *
+ * One token of output each, so the whole sweep costs almost nothing.
+ */
+const VERTEX_PROBE_IDS = [
+  "gemini-2.0-flash-001",
+  "gemini-2.0-flash",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-002",
+  "gemini-2.5-pro",
+  "gemini-2.0-flash-lite-001",
+];
+
+async function probeVertexModels(t) {
+  const base = (t.endpoint.baseUrl ?? "").replace(/\/+$/, "");
+  const headers = { "content-type": "application/json", ...(t.endpoint.headers ?? {}) };
+  const body = JSON.stringify({
+    contents: [{ role: "user", parts: [{ text: "hi" }] }],
+    generationConfig: { maxOutputTokens: 1 },
+  });
+  const accepted = [];
+  for (const id of VERTEX_PROBE_IDS) {
+    try {
+      const res = await fetch(`${base}/models/${id}:generateContent`, { method: "POST", headers, body });
+      // Anything that is not "no such model" means the id resolved — a 429 or a
+      // 400 about the payload still tells us the model exists.
+      if (res.status !== 404) accepted.push(`${id}  (HTTP ${res.status})`);
+    } catch {
+      /* network hiccup on a probe is not worth reporting */
+    }
+  }
+  return accepted;
+}
+
 // ── Harness ───────────────────────────────────────────────────────────────────
 
 const results = [];
@@ -291,6 +331,26 @@ async function runTarget(t) {
       console.log(`${indent}  The endpoint currently serves ${available.length} model(s), including:`);
       for (const name of available.slice(0, 8)) console.log(`${indent}    ${name}`);
       console.log(`${indent}  Re-run with e.g.  \x1b[1m${t.envVar}=${available[0]} npm run smoke -- ${t.name}\x1b[0m`);
+    } else if (t.name === "vertex") {
+      // The listing API returned nothing usable. Fall back to asking the endpoint
+      // that definitely exists — generateContent — whether it accepts each of a
+      // few plausible ids.
+      //
+      // This IS a guess list, and it is confined to the test harness on purpose.
+      // It is not authoritative, it will go stale, and nothing like it belongs in
+      // the router: a 404 here is information, whereas a stale id shipped inside
+      // the library would be a confident wrong answer. See "Why there is no model
+      // catalog" in ARCHITECTURE.md.
+      console.log(`${indent}  The listing API returned nothing. Probing a few common ids directly…`);
+      const found = await probeVertexModels(t);
+      if (found.length) {
+        console.log(`${indent}  Accepted by this project:`);
+        for (const name of found) console.log(`${indent}    ${name}`);
+        console.log(`${indent}  Re-run with  \x1b[1m${t.envVar}=${found[0]} npm run smoke -- ${t.name}\x1b[0m`);
+      } else {
+        console.log(`${indent}  None of the probed ids were accepted. Check the Model Garden page`);
+        console.log(`${indent}  for your project and region, then set \x1b[1m${t.envVar}\x1b[0m.`);
+      }
     } else {
       console.log(`${indent}  Set \x1b[1m${t.envVar}\x1b[0m to a model this endpoint serves.`);
       if (t.name === "vertex") {
