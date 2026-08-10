@@ -233,10 +233,47 @@ means the fix holds against the one topology most likely to trigger it.
 
 | | |
 |---|---|
-| **Status** | ⬜ Not yet run |
+| **Status** | ✅ All checks passed |
+| **Date** | 2026-08-10 |
+| **Commit** | `3f02e82` (`1.0.0-rc.1`) |
 | **Wire shape** | `openai-chat` |
+| **Endpoint** | `https://integrate.api.nvidia.com/v1` |
+| **Model** | `meta/llama-3.3-70b-instruct` |
+| **Auth** | API key as `Authorization: Bearer` |
 
-Broad coverage of the most common shape against a real cloud server.
+```
+── nvidia (openai-chat)  meta/llama-3.3-70b-instruct
+  ✓ buffered call returns text                     "PONG"
+  ✓ usage is reported, not invented                41 in / 3 out / 32 cached (reported)
+  ✓ request id captured                            chatcmpl-79fd32d6-31fc-417b-8c85-dc2bc40
+  ✓ finish reason                                  stop
+  ✓ streaming deltas reconstruct the final text    2 deltas, reported usage
+  ✓ responseFormat json is honoured                {"ok": true}
+  ✓ a bogus model id yields a typed error          PermanentError (status 404)
+
+7/7 checks passed
+```
+
+The `openai-chat` shape against a real cloud server rather than a local shim — the
+same code path that reaches Groq, OpenRouter, Together, Fireworks, DeepSeek, xAI and
+the rest of that tail, none of which needs a line of code here.
+
+**First live confirmation of cached prompt tokens.** `32 cached` came from
+`prompt_tokens_details.cached_tokens`. Cache reads are priced very differently from
+fresh prompt tokens, so folding them into `promptTokens` — which is what happens
+without this mapping — produces a cost figure that is confidently wrong rather than
+merely absent.
+
+**Known gaps at this date**
+
+- A nonexistent model returns 404 but is classified `PermanentError`, **not**
+  `ModelUnavailableError`. The condition is correctly permanent and the caller is not
+  misled, but it loses the one distinction that tells a controller *"substitute a
+  model"* rather than *"the request was malformed"*. This is the third provider whose
+  404 wording the pattern has not matched on first contact; the harness now prints the
+  unmatched message so the next run can close it.
+- No `cache_creation` equivalent is reported by this endpoint, so `cacheWriteTokens`
+  stays undefined. Correct — the router reports what it is told and nothing more.
 
 ---
 
@@ -244,6 +281,6 @@ Broad coverage of the most common shape against a real cloud server.
 
 `1.0.0-rc.1` sits on the `next` dist-tag. It is promoted to `latest` when the rows
 above are filled in. **Vertex, the row the central claim rests on, is done**, as is
-the local CLI bridge — the topology three of this branch's fixes were written for.
-Anthropic and NVIDIA NIM remain. See the checklist at the end
+the local CLI bridge — the topology three of this branch's fixes were written for —
+and NVIDIA NIM. **Anthropic is the only row left.** See the checklist at the end
 of `SMOKE_TEST.md`.

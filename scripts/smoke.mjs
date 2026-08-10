@@ -501,7 +501,12 @@ async function runTarget(t) {
             `classified as ModelUnavailable, but not swallowed either)`;
         }
         // Providers word this inconsistently; a typed error still beats a raw one.
-        return `${err.name} (status ${err.status}) — not classified as ModelUnavailable`;
+        // Print the message when we could not promote it: every time the classifier
+        // has missed, the fix was one word in a pattern, and the only thing standing
+        // between the miss and the fix was seeing what the provider actually said.
+        const said = String(err.message ?? "").replace(/\s+/g, " ").slice(0, 160);
+        return `${err.name} (status ${err.status}) — not classified as ModelUnavailable\n` +
+          `${indent}      provider said: ${said}`;
       }
       throw new Error(`unclassified error: ${err?.name}: ${err?.message}`);
     }
