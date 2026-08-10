@@ -13,7 +13,7 @@ Built for systems where model execution must remain predictable, auditable, and 
 |---|---|---|
 | `anthropic` | Anthropic Messages API | ✅ 8/8 |
 | `google-genai` | Gemini Developer API | ✅ 8/8 |
-| `google-genai` | **Vertex AI** — OAuth bearer, no API key | ✅ 8/8 |
+| `google-genai` | Vertex AI — OAuth bearer, no API key | ✅ 8/8 |
 | `openai-chat` | NVIDIA NIM | ✅ 7/7 |
 | `openai-chat` | local CLI bridge | ✅ 6/6 |
 
