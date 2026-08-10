@@ -140,10 +140,16 @@ function targets() {
 /**
  * Ask the endpoint which models it will actually serve.
  *
- * A hardcoded default rots — `gemini-2.5-flash` was retired for new keys between
- * this harness being written and first being run. Rather than guess again, when a
- * model turns out to be unavailable we ask, which is the same answer the project
- * gives to "should the router ship a catalogue?": no, the endpoint knows.
+ * A hardcoded default rots — `gemini-2.5-flash` was retired for new keys, and
+ * `gemini-flash-latest` is a Developer API alias that Vertex does not recognise.
+ * Rather than guess a third time, ask: which is the same answer this project gives
+ * to "should the router ship a catalogue?" — no, the endpoint knows.
+ *
+ * The two Google surfaces answer in different shapes. The Developer API returns
+ * `models[]` with `supportedGenerationMethods`; Vertex returns `publisherModels[]`
+ * with `supportedActions` and fully-qualified `publishers/google/models/...` names.
+ * Both are handled, because "it works on one Google endpoint" was exactly the
+ * assumption that produced the wrong default.
  *
  * Best-effort and never fatal: a listing failure just means no suggestion.
  */
@@ -158,10 +164,18 @@ async function suggestModels(t) {
     const res = await fetch(`${base}/models?pageSize=200`, { headers });
     if (!res.ok) return null;
     const json = await res.json();
-    return (json.models ?? [])
-      .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent"))
-      .map((m) => String(m.name ?? "").replace(/^models\//, ""))
-      .filter(Boolean);
+    const entries = json.models ?? json.publisherModels ?? [];
+    return entries
+      .filter((m) => {
+        // Developer API states the methods outright. Vertex's shape varies, so an
+        // absent field means "include it" rather than a silently empty list.
+        const methods = m.supportedGenerationMethods;
+        if (!Array.isArray(methods)) return true;
+        return methods.includes("generateContent");
+      })
+      .map((m) => String(m.name ?? "").replace(/^(publishers\/google\/)?models\//, ""))
+      .filter(Boolean)
+      .sort();
   } catch {
     return null;
   }
@@ -270,7 +284,12 @@ async function runTarget(t) {
       for (const name of available.slice(0, 8)) console.log(`${indent}    ${name}`);
       console.log(`${indent}  Re-run with e.g.  \x1b[1m${t.envVar}=${available[0]} npm run smoke -- ${t.name}\x1b[0m`);
     } else {
-      console.log(`${indent}  Set \x1b[1m${t.envVar}\x1b[0m to a model your key can reach.`);
+      console.log(`${indent}  Set \x1b[1m${t.envVar}\x1b[0m to a model this endpoint serves.`);
+      if (t.name === "vertex") {
+        console.log(`${indent}  To list them:  \x1b[1mgcloud ai models list --region=$VERTEX_REGION\x1b[0m`);
+        console.log(`${indent}  \x1b[2mVertex uses its own model ids — Developer API aliases like`);
+        console.log(`${indent}  "gemini-flash-latest" are not recognised there.\x1b[0m`);
+      }
     }
     console.log(`${indent}  \x1b[2mSkipping this target's remaining checks.\x1b[0m`);
     return;

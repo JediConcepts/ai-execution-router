@@ -104,6 +104,11 @@ minute for it to propagate.
 
 Your account needs the **Vertex AI User** role (`roles/aiplatform.user`).
 
+**Billing must be attached to the project.** This catches people out: a project created
+by AI Studio works fine against the Gemini Developer API free tier and still 403s on
+Vertex until billing is enabled. In practice the setup is three gates in sequence —
+API enabled, billing attached, correct model id — and each one 4xxs differently.
+
 ### Each run
 
 Access tokens expire after about an hour, so mint one immediately before running:
@@ -128,7 +133,7 @@ router accepts a call with no API key whatsoever.
 | `AuthError` (403) *"has not been used in project … or it is disabled"* | The Vertex API is not enabled. `gcloud services enable aiplatform.googleapis.com --project=<project>`, then wait ~1 min |
 | `AuthError` (403) *"permission denied"* | Missing `roles/aiplatform.user` on the account |
 | `AuthError` (403) on a project created by AI Studio | Those projects often have no billing account attached; Vertex requires one, unlike the Gemini Developer API free tier |
-| `ModelUnavailableError` (404) | Model not served in that region. Try `us-central1`, or set `SMOKE_VERTEX_MODEL` |
+| `ModelUnavailableError` (404) *"Publisher model … was not found"* | **Vertex uses its own model ids.** Developer API aliases (`gemini-flash-latest`) are not recognised. The harness lists what your project serves; or run `gcloud ai models list --region=$VERTEX_REGION` |
 | `PermanentError` mentioning the URL | Wrong `VERTEX_REGION` — it appears twice in the URL and both must match |
 
 The URL the router builds is worth seeing once, because it explains why Vertex needs
