@@ -16,7 +16,7 @@ Reproduce any row with [`SMOKE_TEST.md`](./SMOKE_TEST.md).
 
 | | |
 |---|---|
-| **Status** | ✅ All checks passed |
+| **Status** | ✅ All checks passed — reproduced across two runs |
 | **Date** | 2026-08-10 |
 | **Commit** | `eebe1c8` (`1.0.0-rc.1`) |
 | **Wire shape** | `google-genai` |
@@ -45,10 +45,18 @@ a nonexistent model id classified as `ModelUnavailableError` (404).
 8/8 checks passed
 ```
 
-**Also observed, on a subsequent run that exhausted the free tier:** a real 429
+**Reproducibility:** 8/8 on two independent runs either side of a quota reset, with
+different request ids and different thinking-token counts each time (66, 85, 95, 112,
+123 across runs). `reasoningTokens` is live per-call data, not a constant — the model
+budgets its own thinking, and the router reports whatever came back.
+
+**Also observed, on an intervening run that exhausted the free tier:** a real 429
 reading *"You exceeded your current quota, please check your plan and billing
 details"* was classified `QuotaExhaustedError` — **not** `RateLimitError` — and was
 not retried.
+
+The check recovered to a pass on the next run once the quota window reset, which
+confirms the classification was reading the condition rather than a coincidence.
 
 That is the release's central governance claim proving itself against a live
 provider. The pattern that caught it was carried over from a production controller
