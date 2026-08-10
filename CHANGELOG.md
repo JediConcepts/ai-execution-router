@@ -70,6 +70,12 @@ each one turned a working call into a thrown error.
   directions. Corrected in `README.md`, `ARCHITECTURE.md` and `SKILL.md`.
 - Removed a paragraph duplicated into a README section where its "these" had no
   antecedent.
+- **The typecheck gate has a name: `npm run typecheck`** (issue #5). CI invoked
+  `npx tsc -p tsconfig.json` directly, so the gate a contributor had to satisfy was
+  spelled one way in `ci.yml`, another in the README, and nowhere in `package.json`.
+  CI and `prepublishOnly` now both run the script, so there is one command to change
+  if the gate ever changes. Behaviour is identical — `tsconfig.json` still sets
+  `noEmit: true`, so this remains a pure typecheck.
 
 ## 1.0.1 — 2026-08-10
 
